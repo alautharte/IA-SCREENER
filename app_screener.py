@@ -1,6 +1,6 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
-Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket Fibonacci · Conexión Google Sheets
+Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket Fibonacci · Gestión Cartera y P&L
 """
 
 import streamlit as st
@@ -207,29 +207,23 @@ def calcular_indicadores(df, bench_serie, horizonte=20):
 def detectores_heuristicos(df):
     c, v, h, l = df["Close"], df["Volume"], df["High"], df["Low"]
     
-    # Heurísticas estándar
     high_50     = c.rolling(50).max()
     is_breakout = bool(c.iloc[-1] >= high_50.iloc[-2]) if len(c) > 50 else False
     vol_m20     = v.rolling(20).mean()
     is_inst_acc = bool(v.iloc[-1] > vol_m20.iloc[-1] * 2) if len(v) > 20 else False
     is_expl_mom = bool(c.pct_change(20).iloc[-1] > 0.15) if len(c) > 20 else False
     
-    # Análisis FIBONACCI (Golden Pocket 50% - 61.8%)
     is_fibo_golden = False
     if len(df) > 60:
         max_60 = h.iloc[-60:].max()
         min_60 = l.iloc[-60:].min()
         rango  = max_60 - min_60
         
-        # Si hay rango operable
         if rango > 0:
             fib_50 = max_60 - (rango * 0.500)
             fib_618 = max_60 - (rango * 0.618)
-            
-            # Definimos la zona de soporte (Pocket) con 1.5% de tolerancia arriba y abajo
             limite_sup = max(fib_50, fib_618) * 1.015
             limite_inf = min(fib_50, fib_618) * 0.985
-            
             precio_actual = c.iloc[-1]
             if limite_inf <= precio_actual <= limite_sup:
                 is_fibo_golden = True
@@ -252,7 +246,7 @@ def _normalizar(X_tr: np.ndarray, x_pred: np.ndarray):
     return (X_tr - mu) / std, (x_pred - mu) / std
 
 # ─────────────────────────────────────────────────────────────────
-# MOTOR WALK-FORWARD INDIVIDUAL (PARA PESTAÑA GRÁFICOS)
+# MOTOR WALK-FORWARD INDIVIDUAL
 # ─────────────────────────────────────────────────────────────────
 def _walk_forward_features(d: pd.DataFrame, feats: list, y_full: np.ndarray, N: int, inicio_wf: int):
     X_full = d[feats].values
@@ -830,23 +824,38 @@ with tab6:
     
     # Descargar la base de datos
     try:
-        df_cartera = conn.read(worksheet="Sheet1", usecols=[0, 1, 2, 3])
-        df_cartera = df_cartera.dropna(how="all") # Limpia filas vacías
+        df_cartera = conn.read(worksheet="Sheet1")
+        df_cartera = df_cartera.dropna(how="all") # Limpia filas vacías completamente vacías
+        
+        # --- MIGRACIÓN AUTOMÁTICA DE ESQUEMA DE BASE DE DATOS ---
+        # Garantiza que todas las columnas necesarias existan para el historial
+        columnas_esperadas = ["Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias", "Estado", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"]
+        for col in columnas_esperadas:
+            if col not in df_cartera.columns:
+                df_cartera[col] = None
+                
+        # Las posiciones viejas o nuevas sin estado asumen ABIERTA
+        df_cartera["Estado"] = df_cartera["Estado"].fillna("ABIERTA")
+        
+        # Casting seguro de tipos numéricos
+        df_cartera["Precio_Compra"] = pd.to_numeric(df_cartera["Precio_Compra"], errors="coerce")
+        df_cartera["Resultado_Pct"] = pd.to_numeric(df_cartera["Resultado_Pct"], errors="coerce")
+        
     except Exception as e:
         st.error(f"Error de lectura en Sheets. Revisá los Secrets de Streamlit y asegurate de que la hoja se llame exactamente 'Sheet1'. Error técnico: {e}")
-        df_cartera = pd.DataFrame(columns=["Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias"])
+        df_cartera = pd.DataFrame(columns=["Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias", "Estado", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"])
+
+    # Separar base de datos lógica
+    df_abiertas = df_cartera[df_cartera["Estado"] == "ABIERTA"]
+    df_cerradas = df_cartera[df_cartera["Estado"] == "CERRADA"]
 
     # 1. Formulario de Ingreso de Operaciones
-    with st.expander("➕ Cargar nueva operación", expanded=False):
+    with st.expander("➕ Abrir Nueva Posición", expanded=False):
         with st.form("form_cartera"):
             c_act, c_precio, c_fecha, c_horiz = st.columns(4)
             
-            # Consolidar todos los tickers válidos de USA y ARG en una sola lista
             tickers_validos = sorted(list(set(cargar_universo_usa() + cargar_universo_arg())))
-            
-            # Reemplazamos el text_input por un selectbox bloqueado a los tickers válidos
             n_activo = c_act.selectbox("Ticker", tickers_validos)
-            
             n_precio = c_precio.number_input("Precio Compra ($)", min_value=0.01, step=0.5, format="%.2f")
             n_fecha  = c_fecha.date_input("Fecha de Compra")
             n_horiz  = c_horiz.selectbox("Horizonte Objetivo", [10, 20, 30])
@@ -857,21 +866,23 @@ with tab6:
                     "Activo": n_activo,
                     "Fecha_Compra": n_fecha.strftime("%Y-%m-%d"),
                     "Precio_Compra": float(n_precio),
-                    "Horizonte_Dias": int(n_horiz)
+                    "Horizonte_Dias": int(n_horiz),
+                    "Estado": "ABIERTA",
+                    "Fecha_Cierre": None,
+                    "Precio_Cierre": None,
+                    "Resultado_Pct": None
                 }])
                 df_actualizado = pd.concat([df_cartera, nueva_fila], ignore_index=True)
-                
-                # Subir actualización a la nube
                 conn.update(worksheet="Sheet1", data=df_actualizado)
-                st.success(f"✅ {n_activo} impactado en la base de datos.")
-                st.cache_data.clear() # Limpia caché para forzar recarga
+                st.success(f"✅ {n_activo} comprada e impactada en la base de datos.")
+                st.cache_data.clear()
                 st.rerun()
 
-    # 2. Análisis y Seguimiento de la Cartera
-    if not df_cartera.empty:
+    # 2. Análisis y Seguimiento de Posiciones ABIERTAS
+    if not df_abiertas.empty:
         st.markdown("#### 📊 Posiciones Activas")
         
-        if st.button("🔄 Ejecutar Auditoría de Cartera", type="primary"):
+        if st.button("🔄 Ejecutar Auditoría en Vivo", type="primary"):
             barra_cartera = st.progress(0, text="Calculando métricas MTM...")
             resultados_cartera = []
             
@@ -880,9 +891,8 @@ with tab6:
             vix_cartera = descargar_vix(anios)
             logger_cartera = ErrorLogger()
 
-            for idx, row in df_cartera.iterrows():
-                barra_cartera.progress((idx + 1) / len(df_cartera), text=f"Actualizando {row['Activo']}...")
-                
+            for idx, row in df_abiertas.iterrows():
+                barra_cartera.progress((idx + 1) / len(df_abiertas), text=f"Actualizando {row['Activo']}...")
                 try:
                     df_act, _, _ = descargar(row["Activo"], 2)
                     if df_act is None: continue
@@ -891,7 +901,6 @@ with tab6:
                     precio_compra = float(row["Precio_Compra"])
                     rendimiento = (precio_actual / precio_compra) - 1
                     
-                    # Motor de Tiempo Hábil
                     fecha_c = datetime.strptime(str(row["Fecha_Compra"]), "%Y-%m-%d").date()
                     dias_transcurridos = np.busday_count(fecha_c, hoy_fecha)
                     dias_restantes = int(row["Horizonte_Dias"]) - dias_transcurridos
@@ -900,7 +909,6 @@ with tab6:
                     if dias_restantes < 0:
                         estado_tiempo = f"❌ VENCIDO (Día {dias_transcurridos})"
 
-                    # Re-evaluación algorítmica de la posición en vivo
                     d_base = calcular_indicadores(df_act, bench_cartera, 20)
                     d_base["vix"] = vix_cartera.reindex(d_base.index, method="ffill")
                     mod_res = ejecutar_modelo_multitemporal(d_base, vix_cartera, logger_cartera, row["Activo"])
@@ -924,7 +932,6 @@ with tab6:
             
             if resultados_cartera:
                 df_show_cartera = pd.DataFrame(resultados_cartera)
-                
                 def style_cartera(row_data):
                     style = [''] * len(row_data)
                     idx_pnl = row_data.index.get_loc('P&L Actual')
@@ -950,9 +957,78 @@ with tab6:
                     }),
                     use_container_width=True, hide_index=True
                 )
+
+        st.markdown("---")
+        
+        # 3. Formulario de CIERRE de Operaciones
+        st.markdown("#### ❌ Cerrar Posición")
+        with st.form("form_cierre"):
+            cl1, cl2, cl3 = st.columns(3)
+            # Lista de activos que están ABIERTOS actualmente
+            lista_abiertas = df_abiertas["Activo"].unique().tolist()
+            
+            ticker_cierre = cl1.selectbox("Seleccionar activo a liquidar", lista_abiertas)
+            precio_cierre = cl2.number_input("Precio de Venta / Cierre ($)", min_value=0.01, step=0.5, format="%.2f")
+            
+            btn_liquidar = st.form_submit_button("Liquidar Activo")
+            if btn_liquidar and ticker_cierre:
+                # Buscamos el índice de la primera coincidencia que esté ABIERTA
+                idx_to_close = df_abiertas[df_abiertas["Activo"] == ticker_cierre].index[0]
+                precio_compra_original = float(df_cartera.at[idx_to_close, "Precio_Compra"])
+                resultado_final = (precio_cierre / precio_compra_original) - 1
                 
-        if st.button("🗑️ Vaciar Google Sheet (Liquidar Cartera)"):
-            df_vacio = pd.DataFrame(columns=["Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias"])
+                # Actualizamos las celdas en el DataFrame principal
+                df_cartera.at[idx_to_close, "Estado"] = "CERRADA"
+                df_cartera.at[idx_to_close, "Fecha_Cierre"] = datetime.today().strftime("%Y-%m-%d")
+                df_cartera.at[idx_to_close, "Precio_Cierre"] = precio_cierre
+                df_cartera.at[idx_to_close, "Resultado_Pct"] = resultado_final
+                
+                # Subimos los cambios
+                conn.update(worksheet="Sheet1", data=df_cartera)
+                st.success(f"✅ Posición de {ticker_cierre} cerrada. Registrada en el historial con un P&L de {resultado_final*100:+.2f}%.")
+                st.cache_data.clear()
+                st.rerun()
+
+    # 4. Historial de Operaciones
+    st.markdown("---")
+    if not df_cerradas.empty:
+        st.markdown("#### 📜 Historial de Operaciones (Track Record)")
+        
+        aciertos = (df_cerradas["Resultado_Pct"] > 0).sum()
+        total_cerradas = len(df_cerradas)
+        win_rate = aciertos / total_cerradas
+        acumulado_pct = df_cerradas["Resultado_Pct"].sum()
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Operaciones Cerradas", total_cerradas)
+        m2.metric("Win Rate Histórico", f"{win_rate*100:.1f}%")
+        m3.metric("P&L Acumulado", f"{acumulado_pct*100:+.2f}%", delta_color="normal" if acumulado_pct > 0 else "inverse")
+        
+        # Formateo visual del historial
+        df_show_hist = df_cerradas[["Activo", "Fecha_Compra", "Precio_Compra", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"]].copy()
+        
+        def style_historial(val):
+            if isinstance(val, float):
+                if val > 0 and val < 1: # Para detectar porcentajes (Aprox)
+                    return 'color: #34d399; font-weight: bold'
+                elif val < 0:
+                    return 'color: #f87171; font-weight: bold'
+            return ''
+
+        st.dataframe(
+            df_show_hist.style.map(style_historial, subset=['Resultado_Pct']).format({
+                "Precio_Compra": "${:.2f}",
+                "Precio_Cierre": "${:.2f}",
+                "Resultado_Pct": "{:+.2%}"
+            }),
+            use_container_width=True, hide_index=True
+        )
+
+    # 5. ZONA DE PELIGRO (Escondida)
+    with st.expander("⚠️ Zona de Peligro (Precaución)", expanded=False):
+        st.error("Atención: Vaciar la base de datos elimina permanentemente todas las posiciones abiertas y todo el historial de operaciones de Google Sheets.")
+        if st.button("🗑️ Vaciar Google Sheets Completamente"):
+            df_vacio = pd.DataFrame(columns=["Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias", "Estado", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"])
             conn.update(worksheet="Sheet1", data=df_vacio)
             st.cache_data.clear()
             st.rerun()
