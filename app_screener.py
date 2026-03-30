@@ -1,6 +1,6 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
-Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket · Multi-Usuario (Opción B)
+Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket · Multi-Usuario
 """
 
 import streamlit as st
@@ -674,4 +674,6 @@ with tab6:
             st.cache_data.clear(); st.rerun()
 
 st.markdown("---")
+st.caption("**Modelo IA Screener v4.0** | Desarrollado por: **LAUTHARTE**")
 st.caption("Motor: LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket · Multi-Usuario")
+st.caption("⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. Los resultados históricos de la auditoría OOS no garantizan rendimientos futuros. Las señales del modelo son estimaciones estadísticas con incertidumbre. El uso de este sistema es bajo su propio riesgo y responsabilidad.")
