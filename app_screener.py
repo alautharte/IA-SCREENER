@@ -840,7 +840,13 @@ with tab6:
     with st.expander("➕ Cargar nueva operación", expanded=False):
         with st.form("form_cartera"):
             c_act, c_precio, c_fecha, c_horiz = st.columns(4)
-            n_activo = c_act.text_input("Ticker (Ej: AAPL)").upper()
+            
+            # Consolidar todos los tickers válidos de USA y ARG en una sola lista
+            tickers_validos = sorted(list(set(cargar_universo_usa() + cargar_universo_arg())))
+            
+            # Reemplazamos el text_input por un selectbox bloqueado a los tickers válidos
+            n_activo = c_act.selectbox("Ticker", tickers_validos)
+            
             n_precio = c_precio.number_input("Precio Compra ($)", min_value=0.01, step=0.5, format="%.2f")
             n_fecha  = c_fecha.date_input("Fecha de Compra")
             n_horiz  = c_horiz.selectbox("Horizonte Objetivo", [10, 20, 30])
