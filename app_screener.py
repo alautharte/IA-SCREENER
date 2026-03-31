@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA Residente v5.0
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA Residente v5.1 (Fixed NameError)
 """
 
 import streamlit as st
@@ -68,6 +68,7 @@ VENTANA_TRAIN = 252
 BLIND_SPOT    = 20
 F_UMBRAL      = 2.6
 R2_MIN        = 0.01
+HORIZONTES_RANK = [10, 20, 30]
 
 VIX_CONTEXTOS = {
     "EUFORIA":       (0,  15,  1.00, "🟢", "#34d399"),
@@ -85,13 +86,20 @@ FEATS_M3 = ["mm50_var", "mm10_vs_mm50", "vol_var20", "ret_3d", "gap_oc"]
 # ─────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400, show_spinner=False)
 def cargar_universo_usa():
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    sp500, ndx = [], []
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
-        sp = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
-        u = [t.replace('.', '-') for t in sp['Symbol'].tolist()]
-        return sorted(list(set(u)))
-    except Exception:
-        return sorted(["AAPL","NVDA","TSLA","META","AMZN","MSFT","GOOGL","JPM","V","WMT","PLTR","AMD","NFLX"])
+        sp_table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
+        sp500 = [t.replace('.', '-') for t in sp_table['Symbol'].tolist()]
+    except Exception: pass 
+    try:
+        ndx_table = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100', storage_options=headers)[4]
+        ndx = [t.replace('.', '-') for t in ndx_table['Ticker'].tolist()]
+    except Exception: pass
+    universo = sorted(list(set(sp500 + ndx)))
+    if not universo:
+        return sorted(["AAPL","NVDA","TSLA","META","AMZN","MSFT","GOOGL","PLTR","AMD","NFLX","JPM","BAC","V","MA","BLK","PYPL"])
+    return universo
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def cargar_universo_arg():
@@ -750,5 +758,5 @@ with tab6:
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v5.0** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v5.1** | Desarrollado por: **LAUTHARTE**")
 st.caption("⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. Los resultados históricos de la auditoría OOS no garantizan rendimientos futuros. Las señales del modelo son estimaciones estadísticas con incertidumbre. El uso de este sistema es bajo su propio riesgo y responsabilidad.")
