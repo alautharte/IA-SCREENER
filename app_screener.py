@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA Residente v5.2
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA Residente v5.3 (Stable)
 """
 
 import streamlit as st
@@ -87,7 +87,7 @@ FEATS_M3 = ["mm50_var", "mm10_vs_mm50", "vol_var20", "ret_3d", "gap_oc"]
 @st.cache_data(ttl=86400, show_spinner=False)
 def cargar_universo_usa():
     sp500, ndx = [], []
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         sp_table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
         sp500 = [t.replace('.', '-') for t in sp_table['Symbol'].tolist()]
@@ -98,7 +98,7 @@ def cargar_universo_usa():
     except Exception: pass
     universo = sorted(list(set(sp500 + ndx)))
     if not universo:
-        return sorted(["AAPL","NVDA","TSLA","META","AMZN","MSFT","GOOGL","PLTR","AMD","NFLX","JPM","BAC","V","MA","BLK","PYPL"])
+        return sorted(["AAPL","NVDA","TSLA","META","AMZN","MSFT","GOOGL","PLTR","AMD","NFLX","JPM","BAC","V","MA"])
     return universo
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -310,18 +310,54 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk):
                 if r2c>0 and (r2c/k)/((1.0-r2c)/(m.sum()-k-1))>=F_UMBRAL and r2a>=R2_MIN:
                     pm[i, j], wm[i, j] = float(xvec @ cfs[:, j]), r2a
         return pm, wm
+    
     p1, w1 = wf(FEATS_M1); p2, w2 = wf(FEATS_M2); p3, w3 = wf(FEATS_M3)
     vh = float(d["vix"].iloc[-1]) if "vix" in d.columns else 18.0
     _, cf, _, _ = contexto_vix(vh)
+    
     fz, r2 = [], []
     for j in range(3):
         ts = w1[-1,j] + w2[-1,j] + w3[-1,j]
         fz.append(((np.nan_to_num(p1[-1,j])*w1[-1,j] + np.nan_to_num(p2[-1,j])*w2[-1,j] + np.nan_to_num(p3[-1,j])*w3[-1,j])/ts*cf) if ts>0 else 0.0)
         r2.append((ts/sum(1 for w in [w1[-1,j],w2[-1,j],w3[-1,j]] if w>0)) if ts>0 else 0.0)
+    
     if max(r2) < R2_MIN: return None
     vc, vv, fm = sum(1 for f in fz if f>0.02), sum(1 for f in fz if f<-0.02), float(np.mean(fz))
     s = "COMPRA FUERTE (3/3)" if vc==3 else ("COMPRAR" if vc>=2 and fm>0.02 else ("VENTA FUERTE (3/3)" if vv==3 else ("VENDER" if vv>=2 and fm<-0.02 else "ESPERAR / MIXTO")))
-    return {"señal": s, "f_10d": round(fz[0], 4), "f_20d": round(fz[1], 4), "f_30d": round(fz[2], 4), "fuerza_media": round(fm, 4), "r2_medio": round(float(np.mean(r2)), 4)}
+    
+    # ── BLOQUE DE MÉTRICAS OOS RESTAURADO PARA EL RANKING ──
+    pw20 = w1[:,1] + w2[:,1] + w3[:,1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cons_h20 = np.where(pw20 > 0, (np.nan_to_num(p1[:,1])*w1[:,1] + np.nan_to_num(p2[:,1])*w2[:,1] + np.nan_to_num(p3[:,1])*w3[:,1]) / pw20, np.nan)
+
+    conds_vix = [d["vix"]<15, (d["vix"]>=15)&(d["vix"]<24), (d["vix"]>=24)&(d["vix"]<32), d["vix"]>=32] if "vix" in d.columns else [np.zeros(N,bool)]*4
+    cons_f20 = cons_h20 * np.select(conds_vix, [1.0, 1.05, 0.9, 0.75], default=1.0)
+    sig_raw = np.where(cons_f20 > 0.02, 1, np.where(cons_f20 < -0.02, -1, 0))
+
+    strat_r = (pd.Series(sig_raw).replace(0, np.nan).ffill(limit=19).fillna(0).shift(1) * d["retorno_diario"].values).dropna()
+    met = {"sharpe": 0.0, "sortino": 0.0, "max_dd": 0.0}
+    if len(strat_r) > 5:
+        met["sharpe"] = float(np.sqrt(252)*strat_r.mean()/strat_r.std()) if strat_r.std() != 0 else 0.0
+        d_neg = strat_r[strat_r < 0]
+        met["sortino"] = float(np.sqrt(252)*strat_r.mean()/d_neg.std()) if len(d_neg) > 2 and d_neg.std() != 0 else 0.0
+        eq = (1 + strat_r).cumprod()
+        met["max_dd"] = float(((eq - eq.cummax()) / eq.cummax()).min())
+
+    mask_t = (sig_raw != 0) & np.isfinite(Ym[:,1])
+    wr = float((((sig_raw[mask_t] == 1) & (Ym[:,1][mask_t] > 0)) | ((sig_raw[mask_t] == -1) & (Ym[:,1][mask_t] < 0))).sum() / mask_t.sum()) if mask_t.sum() > 0 else 0.0
+
+    return {
+        "señal": s, 
+        "f_10d": round(fz[0], 4), 
+        "f_20d": round(fz[1], 4), 
+        "f_30d": round(fz[2], 4), 
+        "fuerza_media": round(fm, 4), 
+        "r2_medio": round(float(np.mean(r2)), 4),
+        "win_rate": wr, 
+        "sharpe_oos": round(met["sharpe"], 2), 
+        "sortino_oos": round(met["sortino"], 2), 
+        "max_dd_oos": round(met["max_dd"], 4)
+    }
 
 def calcular_auditoria_mtm(d, vix_s, h):
     da = d.copy()
@@ -745,5 +781,5 @@ with tab6:
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v5.2** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v5.3** | Desarrollado por: **LAUTHARTE**")
 st.caption("⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. Los resultados históricos de la auditoría OOS no garantizan rendimientos futuros. Las señales del modelo son estimaciones estadísticas con incertidumbre. El uso de este sistema es bajo su propio riesgo y responsabilidad.")
