@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · v4.1 (Fixed NameError)
+Firma: LAUTHARTE · Zoom Estructural · v4.2
 """
 
 import streamlit as st
@@ -181,7 +181,6 @@ def detectores_heuristicos(df):
             if min(f50, f618)*0.985 <= c.iloc[-1] <= max(f50, f618)*1.015: fib = True
     return bk, ins, exp, fib
 
-# ── DEFINICIÓN VIX (LA QUE FALTABA) ──
 def contexto_vix(vix):
     for n, (lo, hi, f, i, c) in VIX_CONTEXTOS.items():
         if lo <= vix < hi: return n, f, i, c
@@ -352,7 +351,7 @@ with tab1:
     fig.add_trace(go.Scatter(x=d.index, y=d["mm50"], name="MM50", line=dict(color="#f87171", width=1.5, dash="dot")), row=1, col=1)
     if show_bb:
         fig.add_trace(go.Scatter(x=d.index, y=d["bb_upper"], name="BB+", line=dict(color="rgba(148,163,184,0.3)")), row=1, col=1)
-        fig.add_trace(go.Scatter(x=d.index, y=d["bb_lower"], name="BB-", fill="tonexty", fillcolor="rgba(148,163,184,0.05)")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=d.index, y=d["bb_lower"], name="BB-", fill="tonexty", fillcolor="rgba(148,163,184,0.05)"), row=1, col=1)
     if cons_adj != 0.0 and mod_res["r2_prom"]>=R2_MIN:
         obj = h["Close"]*(1+cons_adj)
         fig.add_hline(y=obj, line_dash="dash", line_color=sc, annotation_text=f"Objetivo: ${obj:.2f}", row=1, col=1)
@@ -373,9 +372,34 @@ with tab1:
     fig.update_layout(height=600 + (rows_n-1)*130, xaxis_rangeslider_visible=False, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#e2e8f0", margin=dict(t=30, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
-# ─────────────────────────────────────────────────────────────────
-# GESTIÓN CARTERA (TAB 6)
-# ─────────────────────────────────────────────────────────────────
+with tab2:
+    st.markdown("### 🧠 Resultados LINEST")
+    c = st.columns(3)
+    for i, (n, p, r) in enumerate(zip(["M1", "M2", "M3"], [mod_res["pred_rsi"], mod_res["pred_macd"], mod_res["pred_medias"]], [mod_res["r2_rsi"], mod_res["r2_macd"], mod_res["r2_medias"]])):
+        with c[i]:
+            st.metric(n, f"{p*100:+.2f}%", f"R² {r*100:.1f}%")
+
+with tab3:
+    tr, da, met = calcular_auditoria_mtm(d, vix_s, horizonte)
+    if not tr.empty:
+        st.metric("Win Rate", f"{met['win_rate']*100:.1f}%")
+        st.dataframe(tr.sort_index(ascending=False), use_container_width=True)
+
+with tab5:
+    if st.button("🚀 Escanear Mercado", type="primary"):
+        barra, res = st.progress(0, "Iniciando..."), []
+        for i, a in enumerate(lista):
+            barra.progress((i+1)/len(lista), f"Escaneando {a}")
+            dfa, _, _ = descargar(a, anios)
+            if dfa is not None:
+                db = calcular_indicadores(dfa, bench_s, 20)
+                db["vix"] = vix_s.reindex(db.index, method="ffill")
+                mr = ejecutar_modelo_multitemporal(db, vix_s, None, a)
+                if mr: res.append(mr | {"Activo": a, "Precio": dfa["Close"].iloc[-1]})
+        if res: st.session_state["df_rank"] = pd.DataFrame(res).sort_values("fuerza_media", ascending=False)
+    if st.session_state["df_rank"] is not None:
+        st.dataframe(st.session_state["df_rank"], use_container_width=True, hide_index=True)
+
 with tab6:
     st.markdown("### 💼 Mi Cartera")
     from streamlit_gsheets import GSheetsConnection
@@ -387,10 +411,13 @@ with tab6:
     with st.expander("➕ Operación"):
         with st.form("f_c"):
             t_c = st.selectbox("Ticker", sorted(list(set(cargar_universo_usa()+cargar_universo_arg()))))
-            p_c = st.number_input("Precio", min_value=0.01); f_c = st.date_input("Fecha"); h_c = st.selectbox("Horiz", [10, 20, 30])
+            p_c = st.number_input("Precio", min_value=0.01)
+            f_c = st.date_input("Fecha")
+            h_c = st.selectbox("Horiz", [10, 20, 30])
             if st.form_submit_button("Cargar"):
                 nf = pd.DataFrame([{"Usuario":usuario_actual,"Activo":t_c,"Fecha_Compra":f_c.strftime("%Y-%m-%d"),"Precio_Compra":p_c,"Horizonte_Dias":h_c,"Estado":"ABIERTA"}])
-                conn.update(worksheet="Sheet1", data=pd.concat([df_gs, nf], ignore_index=True)); st.success("Cargado"); st.rerun()
+                conn.update(worksheet="Sheet1", data=pd.concat([df_gs, nf], ignore_index=True))
+                st.success("Cargado"); st.rerun()
 
     if not df_u.empty:
         st.markdown("#### Posiciones Abiertas")
@@ -407,5 +434,5 @@ with tab6:
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v4.1** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v4.2** | Desarrollado por: **LAUTHARTE**")
 st.caption("⚠️ **Aviso Legal:** Análisis cuantitativo educativo. NO constituye asesoramiento financiero. Los resultados históricos no garantizan rendimientos futuros.")
