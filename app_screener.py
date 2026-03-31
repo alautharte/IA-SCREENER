@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA Residente v5.1 (Fixed NameError)
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA Residente v5.2
 """
 
 import streamlit as st
@@ -207,24 +207,15 @@ def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl
     consenso_pct = modelo_res['consenso'] * 100
     r2_pct = modelo_res['r2_prom'] * 100
 
-    # Análisis de Tendencia
     tendencia = "alcista primaria" if c > mm50 else "bajista primaria"
     corto_plazo = "acelerando inercia" if c > mm10 else "perdiendo tracción"
 
-    # Análisis de Osciladores
-    if rsi > 70: 
-        rsi_txt = "en zona de sobrecompra técnica (>70), sugiriendo riesgo de corrección inminente"
-    elif rsi < 30: 
-        rsi_txt = "en zona de sobreventa (<30), indicando posible capitulación y agotamiento vendedor"
-    else: 
-        rsi_txt = f"en niveles neutrales ({rsi:.1f}), sin extremos tensionales evidentes"
+    if rsi > 70: rsi_txt = "en zona de sobrecompra técnica (>70), sugiriendo riesgo de corrección inminente"
+    elif rsi < 30: rsi_txt = "en zona de sobreventa (<30), indicando posible capitulación y agotamiento vendedor"
+    else: rsi_txt = f"en niveles neutrales ({rsi:.1f}), sin extremos tensionales evidentes"
 
-    if macd > macd_sig:
-        macd_txt = "cruzado al alza, validando momentum positivo"
-    else:
-        macd_txt = "cruzado a la baja, confirmando presión vendedora"
+    macd_txt = "cruzado al alza, validando momentum positivo" if macd > macd_sig else "cruzado a la baja, confirmando presión vendedora"
 
-    # Variables heurísticas
     flags = []
     if bk: flags.append("ruptura de máximos (breakout)")
     if inst: flags.append("acumulación de volumen anormal")
@@ -234,13 +225,9 @@ def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl
     flags_txt = f" Desde el prisma estructural, se detecta {', '.join(flags)}." if flags else ""
     vix_txt = f"El entorno macro registra volatilidad de {ctx_nom} (VIX: {vix:.2f})."
 
-    # Veredicto Algorítmico
-    if consenso_pct > 2.0:
-        veredicto = f"El ensamblaje de regresión dicta postura **COMPRADORA**, proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días."
-    elif consenso_pct < -2.0:
-        veredicto = f"El ensamblaje de regresión exige **LIQUIDAR** o mantener postura **VENDEDORA**, proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días."
-    else:
-        veredicto = f"El motor dicta postura **NEUTRAL (ESPERAR)**. No se detecta asimetría estadística operable ({consenso_pct:+.2f}% a {horizonte} días)."
+    if consenso_pct > 2.0: veredicto = f"El ensamblaje de regresión dicta postura **COMPRADORA**, proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días."
+    elif consenso_pct < -2.0: veredicto = f"El ensamblaje de regresión exige **LIQUIDAR** o mantener postura **VENDEDORA**, proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días."
+    else: veredicto = f"El motor dicta postura **NEUTRAL (ESPERAR)**. No se detecta asimetría estadística operable ({consenso_pct:+.2f}% a {horizonte} días)."
 
     fiabilidad = "alta" if r2_pct >= 1.0 else "marginal (posible ruido)"
     
@@ -455,7 +442,7 @@ with tab1:
 
     # 🤖 DIAGNÓSTICO IA RESIDENTE
     st.markdown("---")
-    txt_sintesis = generar_sintesis_quant(ticker, h, mod_res, horizonte, bk, ins, exp, fib, v_hoy, cn)
+    txt_sintesis = generar_sintesis_quant(ticker, h, mod_res, horizonte, bk, ins, exp, fib, vh, cn)
     st.info(txt_sintesis)
 
 # ══════════════════════ TAB 2: MODELO ══════════════════════
@@ -758,5 +745,5 @@ with tab6:
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v5.1** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v5.2** | Desarrollado por: **LAUTHARTE**")
 st.caption("⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. Los resultados históricos de la auditoría OOS no garantizan rendimientos futuros. Las señales del modelo son estimaciones estadísticas con incertidumbre. El uso de este sistema es bajo su propio riesgo y responsabilidad.")
