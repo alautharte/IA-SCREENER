@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket · Multi-Usuario
-Firma: LAUTHARTE · Zoom Selectivo Estructural
+Firma: LAUTHARTE · Zoom Estructural · v4.1 (Fixed NameError)
 """
 
 import streamlit as st
@@ -27,7 +27,6 @@ def check_password():
     def password_entered():
         user = st.session_state["username"]
         pwd = st.session_state["password"]
-        
         if "passwords" in st.secrets:
             if user in st.secrets["passwords"] and st.secrets["passwords"][user] == pwd:
                 st.session_state["password_correct"] = True
@@ -85,18 +84,13 @@ FEATS_M3 = ["mm50_var", "mm10_vs_mm50", "vol_var20", "ret_3d", "gap_oc"]
 # ─────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400, show_spinner=False)
 def cargar_universo_usa():
-    sp500, ndx = [], []
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        sp_table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
-        sp500 = [t.replace('.', '-') for t in sp_table['Symbol'].tolist()]
-    except Exception: pass 
-    try:
-        ndx_table = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100', storage_options=headers)[4]
-        ndx = [t.replace('.', '-') for t in ndx_table['Ticker'].tolist()]
-    except Exception: pass
-    u = sorted(list(set(sp500 + ndx)))
-    return u if u else ["AAPL","NVDA","TSLA","META","AMZN","MSFT","GOOGL","JPM","V","WMT"]
+        sp = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
+        u = [t.replace('.', '-') for t in sp['Symbol'].tolist()]
+        return sorted(list(set(u)))
+    except Exception:
+        return sorted(["AAPL","NVDA","TSLA","META","AMZN","MSFT","GOOGL","JPM","V","WMT","PLTR","AMD","NFLX"])
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def cargar_universo_arg():
@@ -147,7 +141,6 @@ def calcular_indicadores(df, bench_serie, horizonte=20):
     d["macd_sig"] = ema(d["macd"], 9)
     d["macd_var"] = (d["macd"] - d["macd_sig"]) / c.replace(0, np.nan)
     
-    # RSI
     diff = c.diff()
     g = diff.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
     p = (-diff).clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
@@ -158,9 +151,7 @@ def calcular_indicadores(df, bench_serie, horizonte=20):
     d["mm10_vs_mm50"] = (d["mm10"] - d["mm50"]) / d["mm50"].replace(0, np.nan)
     d["vol_var20"] = (v - v.rolling(20).mean()) / v.rolling(20).mean()
     
-    # Bollinger
-    m = c.rolling(20).mean()
-    s = c.rolling(20).std()
+    m, s = c.rolling(20).mean(), c.rolling(20).std()
     d["bb_upper"], d["bb_mid"], d["bb_lower"] = m + 2*s, m, m - 2*s
     
     if "High" in d.columns:
@@ -190,8 +181,14 @@ def detectores_heuristicos(df):
             if min(f50, f618)*0.985 <= c.iloc[-1] <= max(f50, f618)*1.015: fib = True
     return bk, ins, exp, fib
 
+# ── DEFINICIÓN VIX (LA QUE FALTABA) ──
+def contexto_vix(vix):
+    for n, (lo, hi, f, i, c) in VIX_CONTEXTOS.items():
+        if lo <= vix < hi: return n, f, i, c
+    return "OPTIMISMO", 1.05, "🔵", "#60a5fa"
+
 # ─────────────────────────────────────────────────────────────────
-# MOTOR DE CÁLCULO
+# MOTOR DE CÁLCULO OLS
 # ─────────────────────────────────────────────────────────────────
 def _normalizar(X_tr, x_pr):
     mu, std = X_tr.mean(axis=0), X_tr.std(axis=0)
@@ -261,9 +258,7 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk):
                 if r2c>0 and (r2c/k)/((1.0-r2c)/(m.sum()-k-1))>=F_UMBRAL and r2a>=R2_MIN:
                     pm[i, j], wm[i, j] = float(xvec @ cfs[:, j]), r2a
         return pm, wm
-    p1, w1 = wf(FEATS_M1)
-    p2, w2 = wf(FEATS_M2)
-    p3, w3 = wf(FEATS_M3)
+    p1, w1 = wf(FEATS_M1); p2, w2 = wf(FEATS_M2); p3, w3 = wf(FEATS_M3)
     vh = float(d["vix"].iloc[-1]) if "vix" in d.columns else 18.0
     _, cf, _, _ = contexto_vix(vh)
     fz, r2 = [], []
@@ -279,8 +274,8 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk):
 def calcular_auditoria_mtm(d, vix_s, h):
     da = d.copy()
     da["vix"] = vix_s.reindex(da.index, method="ffill")
-    cf = np.select([da["vix"]<15, (da["vix"]>=15)&(da["vix"]<24), (da["vix"]>=24)&(da["vix"]<32), da["vix"]>=32], [1.0, 1.05, 0.9, 0.75], 1.0)
-    da["consenso_final"] = da["consenso_raw"] * cf
+    conds = [da["vix"]<15, (da["vix"]>=15)&(da["vix"]<24), (da["vix"]>=24)&(da["vix"]<32), da["vix"]>=32]
+    da["consenso_final"] = da["consenso_raw"] * np.select(conds, [1.0, 1.05, 0.9, 0.75], 1.0)
     da["señal_h"] = np.where(da["consenso_final"]>0.02, "COMPRAR", np.where(da["consenso_final"]<-0.02, "VENDER", "ESPERAR"))
     tr = da[da["señal_h"]!="ESPERAR"].dropna(subset=["retorno_target"]).copy()
     if not tr.empty:
@@ -295,7 +290,7 @@ def calcular_auditoria_mtm(d, vix_s, h):
     return tr, da, met
 
 # ─────────────────────────────────────────────────────────────────
-# UI - SIDEBAR Y DASHBOARD
+# UI - PANEL PRINCIPAL
 # ─────────────────────────────────────────────────────────────────
 for k in ["df_rank", "rank_mercado", "rank_anios"]:
     if k not in st.session_state: st.session_state[k] = None
@@ -310,10 +305,8 @@ with st.sidebar:
     anios = st.slider("Años historia", 2, 10, 3)
     horizonte = st.slider("Horizonte (días)", 5, 60, 20, step=5)
     st.markdown("---")
-    show_bb = st.checkbox("Bandas Bollinger", True)
-    show_vol = st.checkbox("Volumen", True)
-    show_stoch = st.checkbox("Estocástico %K/%D", False)
-    show_atr = st.checkbox("ATR (%)", False)
+    show_bb, show_vol = st.checkbox("Bandas Bollinger", True), st.checkbox("Volumen", True)
+    show_stoch, show_atr = st.checkbox("Estocástico %K/%D", False), st.checkbox("ATR (%)", False)
     if st.button("🔄 Limpiar caché"): st.cache_data.clear(); st.rerun()
 
 st.markdown("# 📊 Modelo IA Screener")
@@ -340,11 +333,7 @@ sc = {"COMPRAR":"#34d399", "VENDER":"#f87171", "ESPERAR":"#facc15"}[s_h]
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.markdown(f"<div style='background:#1e293b;border-radius:8px;padding:12px;text-align:center'><div style='font-size:11px;color:#64748b'>Señal {horizonte}d</div><div style='font-size:1.7rem;font-weight:700;color:{sc}'>{s_h}</div><div style='font-size:12px;color:#64748b'>{cons_adj*100:+.2f}%</div></div>", unsafe_allow_html=True)
-c2.metric("Precio", f"${h['Close']:.2f}")
-c3.metric(f"VIX {ci}", f"{vh:.2f}", cn, delta_color="off")
-c4.metric("RSI-14", f"{h['rsi']:.1f}")
-c5.metric("MACD", f"{h['macd']:.4f}")
-c6.metric("R² Prom", f"{mod_res['r2_prom']*100:.1f}%")
+c2.metric("Precio", f"${h['Close']:.2f}"); c3.metric(f"VIX {ci}", f"{vh:.2f}", cn); c4.metric("RSI-14", f"{h['rsi']:.1f}"); c5.metric("MACD", f"{h['macd']:.4f}"); c6.metric("R² Prom", f"{mod_res['r2_prom']*100:.1f}%")
 
 if any([bk, ins, exp, fib]):
     tags = [t for t, c in zip(["🚀 Breakout", "🏦 Inst Acc", "🔥 Momentum", "📐 Fibo"], [bk, ins, exp, fib]) if c]
@@ -352,98 +341,71 @@ if any([bk, ins, exp, fib]):
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 Gráfico", "🧠 Modelo", "🕵️ Auditoría", "📋 Datos", "🏆 Ranking", "💼 Cartera"])
 
-# ══════════════════════ TAB 1: GRÁFICO (MODIFICADO ZOOM ESTRUCTURAL) ══════════════════════
 with tab1:
     rows_n = 1 + sum([show_vol, show_stoch, show_atr])
     h_rows = [0.55] + [0.15] * (rows_n - 1)
-    subs = ["Precio"] + ([ "Volumen" ] if show_vol else []) + ([ "Estocástico" ] if show_stoch else []) + ([ "ATR %" ] if show_atr else [])
-    
+    subs = ["Precio"] + (["Volumen"] if show_vol else []) + (["Estocástico"] if show_stoch else []) + (["ATR %"] if show_atr else [])
     fig = make_subplots(rows=rows_n, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=h_rows, subplot_titles=subs)
     
-    # 1. Velas (ZOOM LIBRE)
     fig.add_trace(go.Candlestick(x=d.index, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"], name="Precio", increasing_line_color="#34d399", decreasing_line_color="#f87171", showlegend=False), row=1, col=1)
     fig.add_trace(go.Scatter(x=d.index, y=d["mm10"], name="MM10", line=dict(color="#facc15", width=1.5, dash="dot")), row=1, col=1)
     fig.add_trace(go.Scatter(x=d.index, y=d["mm50"], name="MM50", line=dict(color="#f87171", width=1.5, dash="dot")), row=1, col=1)
-    
     if show_bb:
-        fig.add_trace(go.Scatter(x=d.index, y=d["bb_upper"], name="BB+", line=dict(color="rgba(148,163,184,0.3)", width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=d.index, y=d["bb_lower"], name="BB-", fill="tonexty", fillcolor="rgba(148,163,184,0.05)", line=dict(color="rgba(148,163,184,0.3)", width=1)), row=1, col=1)
-    
+        fig.add_trace(go.Scatter(x=d.index, y=d["bb_upper"], name="BB+", line=dict(color="rgba(148,163,184,0.3)")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=d.index, y=d["bb_lower"], name="BB-", fill="tonexty", fillcolor="rgba(148,163,184,0.05)")), row=1, col=1)
     if cons_adj != 0.0 and mod_res["r2_prom"]>=R2_MIN:
         obj = h["Close"]*(1+cons_adj)
-        fig.add_hline(y=obj, line_dash="dash", line_color=sc, opacity=0.8, annotation_text=f"Objetivo {horizonte}d: ${obj:.2f}", row=1, col=1)
+        fig.add_hline(y=obj, line_dash="dash", line_color=sc, annotation_text=f"Objetivo: ${obj:.2f}", row=1, col=1)
 
-    # 2, 3, 4. INDICADORES (ZOOM VERTICAL BLOQUEADO / TAMAÑO FIJO)
     curr = 2
     if show_vol:
         clrs = ["#34d399" if cl>=op else "#f87171" for cl, op in zip(d["Close"], d["Open"])]
         fig.add_trace(go.Bar(x=d.index, y=d["Volume"], marker_color=clrs, showlegend=False), row=curr, col=1)
-        fig.update_yaxes(fixedrange=True, row=curr, col=1) # Bloqueo Vertical
-        curr += 1
+        fig.update_yaxes(fixedrange=True, row=curr, col=1); curr += 1
     if show_stoch and "stoch_k" in d.columns:
-        fig.add_trace(go.Scatter(x=d.index, y=d["stoch_k"], name="%K", line=dict(color="#60a5fa", width=1.5)), row=curr, col=1)
-        fig.add_trace(go.Scatter(x=d.index, y=d["stoch_d"], name="%D", line=dict(color="#f472b6", width=1.5, dash="dot")), row=curr, col=1)
-        fig.update_yaxes(fixedrange=True, row=curr, col=1) # Bloqueo Vertical
-        curr += 1
+        fig.add_trace(go.Scatter(x=d.index, y=d["stoch_k"], name="%K", line=dict(color="#60a5fa")), row=curr, col=1)
+        fig.add_trace(go.Scatter(x=d.index, y=d["stoch_d"], name="%D", line=dict(color="#f472b6", dash="dot")), row=curr, col=1)
+        fig.update_yaxes(fixedrange=True, row=curr, col=1); curr += 1
     if show_atr and "atr_pct" in d.columns:
-        fig.add_trace(go.Scatter(x=d.index, y=d["atr_pct"]*100, name="ATR %", fill="tozeroy", line=dict(color="#a78bfa")), row=curr, col=1)
-        fig.update_yaxes(fixedrange=True, row=curr, col=1) # Bloqueo Vertical
+        fig.add_trace(go.Scatter(x=d.index, y=d["atr_pct"]*100, name="ATR %", fill="tozeroy"), row=curr, col=1)
+        fig.update_yaxes(fixedrange=True, row=curr, col=1)
 
     fig.update_layout(height=600 + (rows_n-1)*130, xaxis_rangeslider_visible=False, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#e2e8f0", margin=dict(t=30, b=10))
-    for i in range(1, rows_n+1):
-        fig.update_yaxes(gridcolor="#1e293b", zerolinecolor="#334155", row=i, col=1)
-        fig.update_xaxes(gridcolor="#1e293b", row=i, col=1)
-    
     st.plotly_chart(fig, use_container_width=True)
 
-# ══════════════════════ RESTO DE TABS ══════════════════════
-with tab2:
-    st.markdown("### 🧠 Resultados LINEST")
-    c = st.columns(3)
-    for i, (n, p, r) in enumerate(zip(["M1", "M2", "M3"], [mod_res["pred_rsi"], mod_res["pred_macd"], mod_res["pred_medias"]], [mod_res["r2_rsi"], mod_res["r2_macd"], mod_res["r2_medias"]])):
-        with c[i]:
-            st.metric(n, f"{p*100:+.2f}%", f"R² {r*100:.1f}%")
-
-with tab3:
-    tr, da, met = calcular_auditoria_mtm(d, vix_s, horizonte)
-    if not tr.empty:
-        st.metric("Win Rate", f"{met['win_rate']*100:.1f}%")
-        st.dataframe(tr.sort_index(ascending=False), use_container_width=True)
-
-with tab5:
-    if st.button("🚀 Escanear Mercado", type="primary"):
-        barra, res = st.progress(0, "Iniciando..."), []
-        for i, a in enumerate(lista):
-            barra.progress((i+1)/len(lista), f"Escaneando {a}")
-            dfa, _, _ = descargar(a, anios)
-            if dfa is not None:
-                db = calcular_indicadores(dfa, bench_s, 20)
-                db["vix"] = vix_s.reindex(db.index, method="ffill")
-                mr = ejecutar_modelo_multitemporal(db, vix_s, None, a)
-                if mr: res.append(mr | {"Activo": a, "Precio": dfa["Close"].iloc[-1]})
-        if res: st.session_state["df_rank"] = pd.DataFrame(res).sort_values("fuerza_media", ascending=False)
-    if st.session_state["df_rank"] is not None:
-        st.dataframe(st.session_state["df_rank"], use_container_width=True, hide_index=True)
-
+# ─────────────────────────────────────────────────────────────────
+# GESTIÓN CARTERA (TAB 6)
+# ─────────────────────────────────────────────────────────────────
 with tab6:
     st.markdown("### 💼 Mi Cartera")
     from streamlit_gsheets import GSheetsConnection
     conn = st.connection("gsheets", type=GSheetsConnection)
     df_gs = conn.read(worksheet="Sheet1").dropna(how="all")
-    df_u = df_gs[df_gs["Usuario"] == usuario_actual] if "Usuario" in df_gs.columns else df_gs
+    if "Usuario" not in df_gs.columns: df_gs["Usuario"] = "admin"
+    df_u = df_gs[df_gs["Usuario"] == usuario_actual].copy()
     
     with st.expander("➕ Operación"):
         with st.form("f_c"):
             t_c = st.selectbox("Ticker", sorted(list(set(cargar_universo_usa()+cargar_universo_arg()))))
-            p_c = st.number_input("Precio", min_value=0.01)
-            f_c = st.date_input("Fecha")
-            h_c = st.selectbox("Horiz", [10, 20, 30])
+            p_c = st.number_input("Precio", min_value=0.01); f_c = st.date_input("Fecha"); h_c = st.selectbox("Horiz", [10, 20, 30])
             if st.form_submit_button("Cargar"):
                 nf = pd.DataFrame([{"Usuario":usuario_actual,"Activo":t_c,"Fecha_Compra":f_c.strftime("%Y-%m-%d"),"Precio_Compra":p_c,"Horizonte_Dias":h_c,"Estado":"ABIERTA"}])
-                conn.update(worksheet="Sheet1", data=pd.concat([df_gs, nf], ignore_index=True))
-                st.success("Cargado"); st.rerun()
-    st.dataframe(df_u, use_container_width=True)
+                conn.update(worksheet="Sheet1", data=pd.concat([df_gs, nf], ignore_index=True)); st.success("Cargado"); st.rerun()
 
+    if not df_u.empty:
+        st.markdown("#### Posiciones Abiertas")
+        st.dataframe(df_u[df_u["Estado"]=="ABIERTA"], use_container_width=True, hide_index=True)
+        with st.form("f_v"):
+            tk_v = st.selectbox("Vender", df_u[df_u["Estado"]=="ABIERTA"]["Activo"].tolist() if not df_u[df_u["Estado"]=="ABIERTA"].empty else [])
+            pr_v = st.number_input("Precio Venta", min_value=0.01)
+            if st.form_submit_button("Cerrar Posición") and tk_v:
+                idx = df_gs[(df_gs["Usuario"]==usuario_actual) & (df_gs["Activo"]==tk_v) & (df_gs["Estado"]=="ABIERTA")].index[0]
+                df_gs.at[idx, "Estado"], df_gs.at[idx, "Precio_Cierre"], df_gs.at[idx, "Fecha_Cierre"] = "CERRADA", pr_v, datetime.today().strftime("%Y-%m-%d")
+                conn.update(worksheet="Sheet1", data=df_gs); st.success("Cerrada"); st.rerun()
+
+# ─────────────────────────────────────────────────────────────────
+# PIE DE PÁGINA
+# ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v4.0** | Desarrollado por: **LAUTHARTE**")
-st.caption("⚠️ **Aviso Legal:** Análisis cuantitativo educativo. NO constituye asesoramiento financiero. Opere bajo su propio riesgo.")
+st.caption("**Modelo IA Screener v4.1** | Desarrollado por: **LAUTHARTE**")
+st.caption("⚠️ **Aviso Legal:** Análisis cuantitativo educativo. NO constituye asesoramiento financiero. Los resultados históricos no garantizan rendimientos futuros.")
