@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
-Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · Ponderación VIX Integrada v5.5
+Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Multi-Usuario
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v6.0 (Stable & Audited)
 """
 
 import streamlit as st
@@ -21,7 +21,7 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title="Modelo IA Screener", page_icon="📊", layout="wide")
 
 # ─────────────────────────────────────────────────────────────────
-# MÓDULO DE AUTENTICACIÓN MULTI-USUARIO (LOGIN)
+# MÓDULO DE AUTENTICACIÓN MULTI-USUARIO (LOGIN SEGURO)
 # ─────────────────────────────────────────────────────────────────
 def check_password():
     def password_entered():
@@ -36,11 +36,8 @@ def check_password():
             else:
                 st.session_state["password_correct"] = False
         else:
-            if user == "admin" and pwd == "admin123":
-                st.session_state["password_correct"] = True
-                st.session_state["logged_user"] = user
-            else:
-                st.session_state["password_correct"] = False
+            # FALLBACK ELIMINADO - SEGURIDAD ESTRICTA
+            st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
@@ -48,6 +45,11 @@ def check_password():
     if not st.session_state["password_correct"]:
         st.markdown("## 🔐 Acceso Restringido")
         st.markdown("Plataforma Cuantitativa Institucional. Por favor, identifíquese.")
+        
+        if "passwords" not in st.secrets:
+            st.error("🚨 Error Crítico: Sistema sin configuración de secrets. Contacte al administrador de arquitectura para inyectar credenciales.")
+            st.stop()
+            
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.text_input("Usuario", key="username")
@@ -68,7 +70,6 @@ VENTANA_TRAIN = 252
 BLIND_SPOT    = 20
 F_UMBRAL      = 2.6
 R2_MIN        = 0.01
-HORIZONTES_RANK = [10, 20, 30]
 
 VIX_CONTEXTOS = {
     "EUFORIA":       (0,  15,  1.00, "🟢", "#34d399"),
@@ -177,18 +178,11 @@ def calcular_indicadores(df, bench_serie, horizonte=20):
     return d
 
 def detectores_heuristicos(df):
-    c, v, h, l = df["Close"], df["Volume"], df["High"], df["Low"]
+    c, v = df["Close"], df["Volume"]
     bk = bool(c.iloc[-1] >= c.rolling(50).max().iloc[-2]) if len(c)>50 else False
     ins = bool(v.iloc[-1] > v.rolling(20).mean().iloc[-1] * 2) if len(v)>20 else False
     exp = bool(c.pct_change(20).iloc[-1] > 0.15) if len(c)>20 else False
-    fib = False
-    if len(df)>60:
-        mx, mn = h.iloc[-60:].max(), l.iloc[-60:].min()
-        r = mx - mn
-        if r>0:
-            f50, f618 = mx - (r*0.5), mx - (r*0.618)
-            if min(f50, f618)*0.985 <= c.iloc[-1] <= max(f50, f618)*1.015: fib = True
-    return bk, ins, exp, fib
+    return bk, ins, exp
 
 def contexto_vix(vix):
     for n, (lo, hi, f, i, c) in VIX_CONTEXTOS.items():
@@ -198,14 +192,16 @@ def contexto_vix(vix):
 # ─────────────────────────────────────────────────────────────────
 # IA GENERATIVA RESIDENTE (NLG CUANTITATIVO)
 # ─────────────────────────────────────────────────────────────────
-def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl, fibo, vix, ctx_nom, peso_vix):
-    c = h_data['Close']
-    rsi = h_data['rsi']
-    macd, macd_sig = h_data['macd'], h_data['macd_sig']
-    mm10, mm50 = h_data['mm10'], h_data['mm50']
+def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl, vix, ctx_nom, peso_vix):
+    c = h_data.get('Close', 0)
+    rsi = h_data.get('rsi', 50)
+    macd = h_data.get('macd', 0)
+    macd_sig = h_data.get('macd_sig', 0)
+    mm10 = h_data.get('mm10', c)
+    mm50 = h_data.get('mm50', c)
     
-    consenso_pct = modelo_res['consenso'] * 100
-    r2_pct = modelo_res['r2_prom'] * 100
+    consenso_pct = modelo_res.get('consenso', 0) * 100
+    r2_pct = modelo_res.get('r2_prom', 0) * 100
 
     tendencia = "alcista primaria" if c > mm50 else "bajista primaria"
     corto_plazo = "acelerando inercia" if c > mm10 else "perdiendo tracción"
@@ -220,7 +216,6 @@ def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl
     if bk: flags.append("ruptura de máximos (breakout)")
     if inst: flags.append("acumulación de volumen anormal")
     if expl: flags.append("momentum explosivo de corto plazo")
-    if fibo: flags.append("soporte activo en zona Golden Pocket de Fibonacci")
     
     flags_txt = f" Desde el prisma estructural, se detecta {', '.join(flags)}." if flags else ""
     vix_txt = f"El entorno macro registra volatilidad de {ctx_nom} (VIX: {vix:.2f}), configurado con una ponderación de influencia del {peso_vix}%."
@@ -271,10 +266,10 @@ def ejecutar_modelo(d, h):
     vacio = dict(consenso=0, r2_prom=0, pred_rsi=0, pred_macd=0, pred_medias=0, r2_rsi=0, r2_macd=0, r2_medias=0)
     N, ini = len(d), LAG_INICIAL + VENTANA_TRAIN + BLIND_SPOT
     if N < ini + 10: return vacio, d
-    yf = d["retorno_target"].values
-    p1, h1, w1, pw1 = _walk_forward_features(d, FEATS_M1, yf, N, ini)
-    p2, h2, w2, pw2 = _walk_forward_features(d, FEATS_M2, yf, N, ini)
-    p3, h3, w3, pw3 = _walk_forward_features(d, FEATS_M3, yf, N, ini)
+    yf_target = d["retorno_target"].values
+    p1, h1, w1, pw1 = _walk_forward_features(d, FEATS_M1, yf_target, N, ini)
+    p2, h2, w2, pw2 = _walk_forward_features(d, FEATS_M2, yf_target, N, ini)
+    p3, h3, w3, pw3 = _walk_forward_features(d, FEATS_M3, yf_target, N, ini)
     sum_w = w1+w2+w3
     res = dict(consenso=round((p1*w1+p2*w2+p3*w3)/sum_w, 6) if sum_w>0 else 0.0, 
                r2_prom=round(sum_w/sum(1 for w in [w1,w2,w3] if w>0), 4) if sum_w>0 else 0.0,
@@ -337,6 +332,10 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
     cons_f20 = cons_h20 * adj_factors
     sig_raw = np.where(cons_f20 > 0.02, 1, np.where(cons_f20 < -0.02, -1, 0))
 
+    # Aislamiento OOS para Win Rate (Corrección Crítica 4)
+    oos_mask = np.arange(N) >= ini
+    mask_t = (sig_raw != 0) & np.isfinite(Ym[:,1]) & oos_mask
+    
     strat_r = (pd.Series(sig_raw).replace(0, np.nan).ffill(limit=19).fillna(0).shift(1) * d["retorno_diario"].values).dropna()
     met = {"sharpe": 0.0, "sortino": 0.0, "max_dd": 0.0}
     if len(strat_r) > 5:
@@ -346,7 +345,6 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
         eq = (1 + strat_r).cumprod()
         met["max_dd"] = float(((eq - eq.cummax()) / eq.cummax()).min())
 
-    mask_t = (sig_raw != 0) & np.isfinite(Ym[:,1])
     wr = float((((sig_raw[mask_t] == 1) & (Ym[:,1][mask_t] > 0)) | ((sig_raw[mask_t] == -1) & (Ym[:,1][mask_t] < 0))).sum() / mask_t.sum()) if mask_t.sum() > 0 else 0.0
 
     return {"señal": s, "f_10d": round(fz[0], 4), "f_20d": round(fz[1], 4), "f_30d": round(fz[2], 4), "fuerza_media": round(fm, 4), "r2_medio": round(float(np.mean(r2)), 4), "win_rate": wr, "sharpe_oos": round(met["sharpe"], 2), "sortino_oos": round(met["sortino"], 2), "max_dd_oos": round(met["max_dd"], 4)}
@@ -375,7 +373,7 @@ def calcular_auditoria_mtm(d, vix_s, h, peso_vix):
 # ─────────────────────────────────────────────────────────────────
 # UI - PANEL PRINCIPAL
 # ─────────────────────────────────────────────────────────────────
-for k in ["df_rank", "rank_mercado", "rank_anios"]:
+for k in ["df_rank", "rank_mercado", "rank_anios", "df_errores"]:
     if k not in st.session_state: st.session_state[k] = None
 
 with st.sidebar:
@@ -397,9 +395,11 @@ with st.sidebar:
     show_stoch = st.checkbox("Estocástico %K/%D", False)
     show_atr = st.checkbox("ATR (%)", False)
     st.markdown("---")
-    if st.button("🔄 Limpiar caché", use_container_width=True):
+    if st.button("🔄 Limpiar caché (Resincronizar BD)", use_container_width=True):
         st.cache_data.clear()
-        st.session_state["df_rank"], st.session_state["df_errores"] = None, None
+        st.session_state["df_rank"] = None
+        st.session_state["df_errores"] = None
+        if "df_cartera_cache" in st.session_state: del st.session_state["df_cartera_cache"]
         st.rerun()
 
 st.markdown("# 📊 Modelo IA Screener")
@@ -416,13 +416,12 @@ if df_raw is None: st.error(f"⚠️ {em}"); st.stop()
 d = calcular_indicadores(df_raw, bench_s, horizonte)
 d["vix"] = vix_s.reindex(d.index, method="ffill")
 mod_res, d = ejecutar_modelo(d, horizonte)
-bk, ins, exp, fib = detectores_heuristicos(df_raw)
+bk, ins, exp = detectores_heuristicos(df_raw) # Fibo retirado del destructuring
 
 h = d.iloc[-1]
 vh = float(h.get("vix", 18.0) or 18.0)
 cn, cf_base, ci, _ = contexto_vix(vh)
 
-# Ajuste de ponderación en la UI principal
 cf_adj = 1.0 + (cf_base - 1.0) * (peso_vix / 100.0)
 cons_adj = mod_res["consenso"] * cf_adj
 
@@ -433,14 +432,14 @@ c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.markdown(f"<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;text-align:center'><div style='font-size:11px;color:#64748b;text-transform:uppercase'>Señal {horizonte}d</div><div style='font-size:1.7rem;font-weight:700;color:{sc}'>{s_h}</div><div style='font-size:12px;color:#64748b'>{'+' if cons_adj >= 0 else ''}{cons_adj*100:.2f}%</div></div>", unsafe_allow_html=True)
 c2.metric("Precio", f"${h['Close']:.2f}"); c3.metric(f"VIX {ci}", f"{vh:.2f}", f"Ajuste {peso_vix}%", delta_color="off"); c4.metric("RSI-14", f"{h['rsi']:.1f}", "Sobrecompra" if h["rsi"] > 70 else ("Sobreventa" if h["rsi"] < 30 else "Normal"), delta_color="inverse" if h["rsi"] > 70 else "normal"); c5.metric("MACD", f"{h['macd']:.4f}", "↑ Alcista" if h["macd"] > h["macd_sig"] else "↓ Bajista", delta_color="normal" if h["macd"] > h["macd_sig"] else "inverse"); c6.metric("R² Prom", f"{mod_res['r2_prom']*100:.1f}%", "Significativo" if mod_res["r2_prom"] >= R2_MIN else "Sin señal")
 
-if any([bk, ins, exp, fib]):
-    tags = [t for t, c in zip(["🚀 Breakout (Máx 50d)", "🏦 Acum. Inst. (Vol. 2x)", "🔥 Momentum (>15%)", "📐 Golden Pocket Fib"], [bk, ins, exp, fib]) if c]
+if any([bk, ins, exp]):
+    tags = [t for t, c in zip(["🚀 Breakout (Máx 50d)", "🏦 Acum. Inst. (Vol. 2x)", "🔥 Momentum (>15%)"], [bk, ins, exp]) if c]
     st.markdown(f"**Banderas activas:** `{'` · `'.join(tags)}`")
 
 st.markdown("---")
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 Gráfico", "🧠 Modelo LINEST", "🕵️ Auditoría OOS", "📋 Datos", "🏆 Ranking Global", "💼 Mi Cartera"])
 
-# ══════════════════════ TAB 1: GRÁFICO (CON IA NLG) ══════════════════════
+# ══════════════════════ TAB 1: GRÁFICO ══════════════════════
 with tab1:
     rows_n = 1 + sum([show_vol, show_stoch, show_atr])
     h_rows = [0.55] + [0.15] * (rows_n - 1)
@@ -477,10 +476,10 @@ with tab1:
     st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
-    txt_sintesis = generar_sintesis_quant(ticker, h, mod_res, horizonte, bk, ins, exp, fib, vh, cn, peso_vix)
+    txt_sintesis = generar_sintesis_quant(ticker, h, mod_res, horizonte, bk, ins, exp, vh, cn, peso_vix)
     st.info(txt_sintesis)
 
-# ══════════════════════ TAB 2: MODELO ══════════════════════
+# ══════════════════════ TAB 2: MODELO (CON VIX CONSENSO RESTAURADO) ══════════════════════
 with tab2:
     st.markdown(f"### 🧠 Resultados LINEST Walk-Forward ({horizonte}d)")
     c = st.columns(3)
@@ -494,6 +493,12 @@ with tab2:
             st.metric("Predicción", f"{p*100:+.2f}%" if act else "— filtrado")
             st.metric("R² adj (peso)", f"{r*100:.2f}%", "✅ Significativo" if act else "❌ Ruido — descartado", delta_color="normal" if act else "inverse")
             st.caption(ds)
+            
+    st.markdown("---")
+    cc1, cc2, cc3 = st.columns(3)
+    cc1.metric("Consenso ponderado", f"{mod_res['consenso']*100:+.2f}%")
+    cc2.metric(f"Factor VIX ({ci} {cn})", f"{cf_adj:.2f}x", f"VIX {vh:.1f} (Pond: {peso_vix}%)")
+    cc3.metric("Consenso ajustado VIX", f"{cons_adj*100:+.2f}%", f"→ {s_h}", delta_color="normal" if cons_adj > 0 else "inverse")
 
 # ══════════════════════ TAB 3: AUDITORÍA OOS ══════════════════════
 with tab3:
@@ -555,12 +560,11 @@ with tab5:
             
             if mod_r is None: continue
             
-            bk_a, inst_a, expl_a, fibo_a = detectores_heuristicos(df_act)
+            bk_a, inst_a, expl_a = detectores_heuristicos(df_act)
             tags = []
             if bk_a: tags.append("🚀 Breakout")
             if inst_a: tags.append("🏦 Inst. Acc.")
             if expl_a: tags.append("🔥 Momentum")
-            if fibo_a: tags.append("📐 Golden Pocket Fib")
 
             resultados.append({
                 "Activo": activo, "Precio": round(float(ult_c), 2), "Señal": mod_r["señal"],
@@ -616,27 +620,29 @@ with tab6:
     from streamlit_gsheets import GSheetsConnection
     conn = st.connection("gsheets", type=GSheetsConnection)
     
-    try:
-        df_completo = conn.read(worksheet="Sheet1")
-        df_completo = df_completo.dropna(how="all") 
-        
-        for col in ["Usuario", "Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias", "Estado", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"]:
-            if col not in df_completo.columns: df_completo[col] = None
-                
-        df_completo["Estado"] = df_completo["Estado"].fillna("ABIERTA")
-        df_completo["Usuario"] = df_completo["Usuario"].fillna("admin")
-        df_completo["Precio_Compra"] = pd.to_numeric(df_completo["Precio_Compra"], errors="coerce")
-        df_completo["Resultado_Pct"] = pd.to_numeric(df_completo["Resultado_Pct"], errors="coerce")
-        
-        df_cartera = df_completo[df_completo["Usuario"] == usuario_actual].copy()
-        
-    except Exception as e:
-        st.error(f"Error de lectura en Sheets. Revisá los Secrets de Streamlit. Error: {e}")
-        df_completo = pd.DataFrame(columns=["Usuario", "Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias", "Estado", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"])
-        df_cartera = df_completo.copy()
+    # Manejo optimizado de estado de DB (Advertencia A)
+    if "df_cartera_cache" not in st.session_state:
+        try:
+            df_bd = conn.read(worksheet="Sheet1")
+            st.session_state["df_cartera_cache"] = df_bd.dropna(how="all") 
+        except Exception as e:
+            st.error(f"Error de lectura en Sheets. Revisá los Secrets. Error: {e}")
+            st.session_state["df_cartera_cache"] = pd.DataFrame(columns=["Usuario", "Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias", "Estado", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"])
 
-    df_abiertas = df_cartera[df_cartera["Estado"] == "ABIERTA"]
-    df_cerradas = df_cartera[df_cartera["Estado"] == "CERRADA"]
+    df_completo = st.session_state["df_cartera_cache"]
+
+    for col in ["Usuario", "Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias", "Estado", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"]:
+        if col not in df_completo.columns: df_completo[col] = None
+            
+    df_completo["Estado"] = df_completo["Estado"].fillna("ABIERTA")
+    df_completo["Usuario"] = df_completo["Usuario"].fillna("admin")
+    df_completo["Precio_Compra"] = pd.to_numeric(df_completo["Precio_Compra"], errors="coerce")
+    df_completo["Resultado_Pct"] = pd.to_numeric(df_completo["Resultado_Pct"], errors="coerce")
+    
+    df_cartera = df_completo[df_completo["Usuario"] == usuario_actual].copy()
+
+    df_abiertas = df_cartera[df_cartera["Estado"] == "ABIERTA"].copy()
+    df_cerradas = df_cartera[df_cartera["Estado"] == "CERRADA"].copy()
 
     with st.expander("➕ Abrir Nueva Posición", expanded=False):
         with st.form("form_cartera"):
@@ -651,8 +657,9 @@ with tab6:
                 nueva_fila = pd.DataFrame([{"Usuario": usuario_actual, "Activo": n_activo, "Fecha_Compra": n_fecha.strftime("%Y-%m-%d"), "Precio_Compra": float(n_precio), "Horizonte_Dias": int(n_horiz), "Estado": "ABIERTA", "Fecha_Cierre": None, "Precio_Cierre": None, "Resultado_Pct": None}])
                 df_actualizado = pd.concat([df_completo, nueva_fila], ignore_index=True)
                 conn.update(worksheet="Sheet1", data=df_actualizado)
+                del st.session_state["df_cartera_cache"] # Invalida cache post-escritura
                 st.success(f"✅ {n_activo} comprada e impactada para {usuario_actual}.")
-                st.cache_data.clear(); st.rerun()
+                st.rerun()
 
     if not df_abiertas.empty:
         st.markdown("#### 📊 Posiciones Activas")
@@ -673,7 +680,9 @@ with tab6:
                     precio_actual = float(df_act["Close"].iloc[-1])
                     precio_compra = float(row["Precio_Compra"])
                     rendimiento = (precio_actual / precio_compra) - 1
-                    fecha_c = datetime.strptime(str(row["Fecha_Compra"]), "%Y-%m-%d").date()
+                    
+                    # Parseo robusto (Advertencia B)
+                    fecha_c = pd.to_datetime(row["Fecha_Compra"]).date()
                     dias_transcurridos = np.busday_count(fecha_c, hoy_fecha)
                     dias_restantes = int(row["Horizonte_Dias"]) - dias_transcurridos
                     
@@ -686,7 +695,8 @@ with tab6:
                     senal_hoy = mod_r2["señal"] if mod_r2 else "RUIDO/DESCARTADO"
 
                     resultados_cartera.append({"Activo": row["Activo"], "Fecha Compra": row["Fecha_Compra"], "Horizonte": f"{row['Horizonte_Dias']} días", "Precio Compra": round(precio_compra, 2), "Precio Actual": round(precio_actual, 2), "P&L Actual": rendimiento, "Días Restantes": estado_tiempo, "Señal HOY": senal_hoy})
-                except Exception: pass
+                except Exception as e: 
+                    st.warning(f"Error procesando {row['Activo']}: {str(e)[:50]}") # Advertencia C
             
             barra_cartera.empty()
             if resultados_cartera:
@@ -712,11 +722,15 @@ with tab6:
         st.markdown("#### ❌ Cerrar Posición")
         with st.form("form_cierre"):
             cl1, cl2, cl3 = st.columns(3)
-            ticker_cierre = cl1.selectbox("Seleccionar activo a liquidar", df_abiertas["Activo"].unique().tolist())
+            # Advertencia D: Manejo de duplicados
+            df_abiertas["Label_Cierre"] = df_abiertas.apply(lambda x: f"{x['Activo']} (C: {x['Fecha_Compra']} a ${x['Precio_Compra']:.2f})", axis=1)
+            label_dict = dict(zip(df_abiertas["Label_Cierre"], df_abiertas.index))
+            
+            ticker_cierre_lbl = cl1.selectbox("Seleccionar operación a liquidar", list(label_dict.keys()))
             precio_cierre = cl2.number_input("Precio de Venta / Cierre ($)", min_value=0.01, step=0.5, format="%.2f")
             
-            if st.form_submit_button("Liquidar Activo") and ticker_cierre:
-                idx_to_close = df_completo[(df_completo["Usuario"] == usuario_actual) & (df_completo["Activo"] == ticker_cierre) & (df_completo["Estado"] == "ABIERTA")].index[0]
+            if st.form_submit_button("Liquidar Operación") and ticker_cierre_lbl:
+                idx_to_close = label_dict[ticker_cierre_lbl]
                 precio_compra_original = float(df_completo.at[idx_to_close, "Precio_Compra"])
                 resultado_final = (precio_cierre / precio_compra_original) - 1
                 
@@ -726,8 +740,9 @@ with tab6:
                 df_completo.at[idx_to_close, "Resultado_Pct"] = resultado_final
                 
                 conn.update(worksheet="Sheet1", data=df_completo)
-                st.success(f"✅ Posición de {ticker_cierre} cerrada. Registrada en el historial con P&L de {resultado_final*100:+.2f}%.")
-                st.cache_data.clear(); st.rerun()
+                del st.session_state["df_cartera_cache"] # Invalida cache post-escritura
+                st.success(f"✅ Operación cerrada exitosamente. P&L: {resultado_final*100:+.2f}%.")
+                st.rerun()
 
     st.markdown("---")
     if not df_cerradas.empty:
@@ -757,11 +772,12 @@ with tab6:
         if st.button("🗑️ Vaciar Mi Cartera Completamente"):
             df_restante = df_completo[df_completo["Usuario"] != usuario_actual]
             conn.update(worksheet="Sheet1", data=df_restante)
-            st.cache_data.clear(); st.rerun()
+            if "df_cartera_cache" in st.session_state: del st.session_state["df_cartera_cache"]
+            st.rerun()
 
 # ─────────────────────────────────────────────────────────────────
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v5.5** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v6.0** | Desarrollado por: **LAUTHARTE**")
 st.caption("⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. Los resultados históricos de la auditoría OOS no garantizan rendimientos futuros. Las señales del modelo son estimaciones estadísticas con incertidumbre. El uso de este sistema es bajo su propio riesgo y responsabilidad.")
