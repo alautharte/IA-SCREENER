@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v6.1 (UX Cartera)
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v6.2 (UI VIX Restaurada)
 """
 
 import streamlit as st
@@ -432,7 +432,15 @@ sc = {"COMPRAR":"#34d399", "VENDER":"#f87171", "ESPERAR":"#facc15"}[s_h]
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.markdown(f"<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;text-align:center'><div style='font-size:11px;color:#64748b;text-transform:uppercase'>Señal {horizonte}d</div><div style='font-size:1.7rem;font-weight:700;color:{sc}'>{s_h}</div><div style='font-size:12px;color:#64748b'>{'+' if cons_adj >= 0 else ''}{cons_adj*100:.2f}%</div></div>", unsafe_allow_html=True)
-c2.metric("Precio", f"${h['Close']:.2f}"); c3.metric(f"VIX {ci}", f"{vh:.2f}", f"Ajuste {peso_vix}%", delta_color="off"); c4.metric("RSI-14", f"{h['rsi']:.1f}", "Sobrecompra" if h["rsi"] > 70 else ("Sobreventa" if h["rsi"] < 30 else "Normal"), delta_color="inverse" if h["rsi"] > 70 else "normal"); c5.metric("MACD", f"{h['macd']:.4f}", "↑ Alcista" if h["macd"] > h["macd_sig"] else "↓ Bajista", delta_color="normal" if h["macd"] > h["macd_sig"] else "inverse"); c6.metric("R² Prom", f"{mod_res['r2_prom']*100:.1f}%", "Significativo" if mod_res["r2_prom"] >= R2_MIN else "Sin señal")
+c2.metric("Precio", f"${h['Close']:.2f}")
+
+# --- Corrección Visual VIX ---
+c3.metric(f"VIX {ci}", f"{vh:.2f}", f"{cn} (Ajuste {peso_vix}%)", delta_color="off")
+# -----------------------------
+
+c4.metric("RSI-14", f"{h['rsi']:.1f}", "Sobrecompra" if h["rsi"] > 70 else ("Sobreventa" if h["rsi"] < 30 else "Normal"), delta_color="inverse" if h["rsi"] > 70 else "normal")
+c5.metric("MACD", f"{h['macd']:.4f}", "↑ Alcista" if h["macd"] > h["macd_sig"] else "↓ Bajista", delta_color="normal" if h["macd"] > h["macd_sig"] else "inverse")
+c6.metric("R² Prom", f"{mod_res['r2_prom']*100:.1f}%", "Significativo" if mod_res["r2_prom"] >= R2_MIN else "Sin señal")
 
 if any([bk, ins, exp]):
     tags = [t for t, c in zip(["🚀 Breakout (Máx 50d)", "🏦 Acum. Inst. (Vol. 2x)", "🔥 Momentum (>15%)"], [bk, ins, exp]) if c]
@@ -499,7 +507,7 @@ with tab2:
     st.markdown("---")
     cc1, cc2, cc3 = st.columns(3)
     cc1.metric("Consenso ponderado", f"{mod_res['consenso']*100:+.2f}%")
-    cc2.metric(f"Factor VIX ({ci} {cn})", f"{cf_adj:.2f}x", f"VIX {vh:.1f} (Pond: {peso_vix}%)")
+    cc2.metric(f"Factor VIX ({ci} {cn})", f"{cf_adj:.2f}x", f"VIX {vh:.1f} | Pond: {peso_vix}%", delta_color="off")
     cc3.metric("Consenso ajustado VIX", f"{cons_adj*100:+.2f}%", f"→ {s_h}", delta_color="normal" if cons_adj > 0 else "inverse")
 
 # ══════════════════════ TAB 3: AUDITORÍA OOS ══════════════════════
@@ -788,5 +796,5 @@ with tab6:
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v6.1** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v6.2** | Desarrollado por: **LAUTHARTE**")
 st.caption("⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. Los resultados históricos de la auditoría OOS no garantizan rendimientos futuros. Las señales del modelo son estimaciones estadísticas con incertidumbre. El uso de este sistema es bajo su propio riesgo y responsabilidad.")
