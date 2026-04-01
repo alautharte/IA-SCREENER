@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v6.2 (UI VIX Restaurada)
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v7.1 (OOS Sealed & Stable)
 """
 
 import streamlit as st
@@ -66,9 +66,9 @@ usuario_actual = st.session_state["logged_user"]
 # ─────────────────────────────────────────────────────────────────
 LAG_INICIAL   = 51
 VENTANA_TRAIN = 252
-BLIND_SPOT    = 20
 F_UMBRAL      = 2.6
 R2_MIN        = 0.01
+HORIZONTES_RANK = [10, 20, 30] # Constante global restaurada
 
 VIX_CONTEXTOS = {
     "EUFORIA":       (0,  15,  1.00, "🟢", "#34d399"),
@@ -144,7 +144,13 @@ def ema(s, n): return s.ewm(span=n, adjust=False).mean()
 def calcular_indicadores(df, bench_serie, horizonte=20):
     d = df.copy()
     c, v, o = d["Close"], d["Volume"], d["Open"]
-    d["fuerza_rel"] = (c.pct_change(20) - bench_serie.reindex(d.index, method="ffill").pct_change(20)) if not bench_serie.empty else 0.0
+    
+    if not bench_serie.empty:
+        bench_safe = bench_serie.loc[:d.index[-1]].reindex(d.index, method="ffill")
+        d["fuerza_rel"] = c.pct_change(20) - bench_safe.pct_change(20)
+    else:
+        d["fuerza_rel"] = 0.0
+        
     d["ema12"], d["ema26"] = ema(c, 12), ema(c, 26)
     d["macd"] = d["ema12"] - d["ema26"]
     d["macd_sig"] = ema(d["macd"], 9)
@@ -239,13 +245,19 @@ def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl
 def _normalizar(X_tr, x_pr):
     mu, std = X_tr.mean(axis=0), X_tr.std(axis=0)
     std[std == 0] = 1.0
-    return (X_tr - mu) / std, (x_pr - mu) / std
+    
+    X_norm = (X_tr - mu) / std
+    x_pr_norm = (x_pr - mu) / std
+    x_pr_norm = np.clip(x_pr_norm, -4.0, 4.0)
+    
+    return X_norm, x_pr_norm
 
-def _walk_forward_features(d, feats, y_f, N, ini_wf):
+def _walk_forward_features(d, feats, y_f, N, ini_wf, blind_spot):
     X_f, k = d[feats].values, len(feats)
     preds, pesos = np.full(N, np.nan), np.full(N, 0.0)
     for i in range(ini_wf, N):
-        fn, in_ = i - BLIND_SPOT, max(LAG_INICIAL, i - BLIND_SPOT - VENTANA_TRAIN)
+        fn = i - blind_spot
+        in_ = max(LAG_INICIAL, fn - VENTANA_TRAIN)
         Xt_v, yt_v = X_f[in_:fn], y_f[in_:fn]
         mask = np.all(np.isfinite(Xt_v), axis=1) & np.isfinite(yt_v)
         if mask.sum() < 50 or not np.all(np.isfinite(X_f[i])): continue
@@ -263,12 +275,18 @@ def _walk_forward_features(d, feats, y_f, N, ini_wf):
 
 def ejecutar_modelo(d, h):
     vacio = dict(consenso=0, r2_prom=0, pred_rsi=0, pred_macd=0, pred_medias=0, r2_rsi=0, r2_macd=0, r2_medias=0)
-    N, ini = len(d), LAG_INICIAL + VENTANA_TRAIN + BLIND_SPOT
+    
+    blind_spot_dinamico = h
+    ini = LAG_INICIAL + VENTANA_TRAIN + blind_spot_dinamico
+    N = len(d)
+    
     if N < ini + 10: return vacio, d
+    
     yf_target = d["retorno_target"].values
-    p1, h1, w1, pw1 = _walk_forward_features(d, FEATS_M1, yf_target, N, ini)
-    p2, h2, w2, pw2 = _walk_forward_features(d, FEATS_M2, yf_target, N, ini)
-    p3, h3, w3, pw3 = _walk_forward_features(d, FEATS_M3, yf_target, N, ini)
+    p1, h1, w1, pw1 = _walk_forward_features(d, FEATS_M1, yf_target, N, ini, blind_spot_dinamico)
+    p2, h2, w2, pw2 = _walk_forward_features(d, FEATS_M2, yf_target, N, ini, blind_spot_dinamico)
+    p3, h3, w3, pw3 = _walk_forward_features(d, FEATS_M3, yf_target, N, ini, blind_spot_dinamico)
+    
     sum_w = w1+w2+w3
     res = dict(consenso=round((p1*w1+p2*w2+p3*w3)/sum_w, 6) if sum_w>0 else 0.0, 
                r2_prom=round(sum_w/sum(1 for w in [w1,w2,w3] if w>0), 4) if sum_w>0 else 0.0,
@@ -279,16 +297,21 @@ def ejecutar_modelo(d, h):
     return res, d
 
 def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
-    N, ini = len(d), LAG_INICIAL + VENTANA_TRAIN + BLIND_SPOT
+    blind_spot_max = max(HORIZONTES_RANK)
+    ini = LAG_INICIAL + VENTANA_TRAIN + blind_spot_max
+    N = len(d)
+    
     if N < ini + 10: return None
     c = d["Close"]
     Ym = np.column_stack([(c.shift(-10)/c-1).values, (c.shift(-20)/c-1).values, (c.shift(-30)/c-1).values])
+    
     def wf(f):
         Xf, k = d[f].values, len(f)
         pm, wm = np.full((N, 3), np.nan), np.zeros((N, 3))
         for i in range(ini, N):
-            fn, st = i - BLIND_SPOT, max(LAG_INICIAL, i - BLIND_SPOT - VENTANA_TRAIN)
-            Xv, Yv = Xf[st:fn], Ym[st:fn]
+            fn = i - blind_spot_max
+            st_idx = max(LAG_INICIAL, fn - VENTANA_TRAIN)
+            Xv, Yv = Xf[st_idx:fn], Ym[st_idx:fn]
             m = np.all(np.isfinite(Xv), 1) & np.all(np.isfinite(Yv), 1)
             if m.sum()<50 or not np.all(np.isfinite(Xf[i])): continue
             Xn, xn = _normalizar(Xv[m], Xf[i])
@@ -349,6 +372,9 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
 
 def calcular_auditoria_mtm(d, vix_s, h, peso_vix):
     da = d.copy()
+    N = len(da)
+    ini_oos = LAG_INICIAL + VENTANA_TRAIN + h
+    
     da["vix"] = vix_s.reindex(da.index, method="ffill")
     conds = [da["vix"]<15, (da["vix"]>=15)&(da["vix"]<24), (da["vix"]>=24)&(da["vix"]<32), da["vix"]>=32]
     base_factors = np.select(conds, [1.0, 1.05, 0.9, 0.75], 1.0)
@@ -356,7 +382,15 @@ def calcular_auditoria_mtm(d, vix_s, h, peso_vix):
     da["consenso_final"] = da["consenso_raw"] * adj_factors
     
     da["señal_h"] = np.where(da["consenso_final"]>0.02, "COMPRAR", np.where(da["consenso_final"]<-0.02, "VENDER", "ESPERAR"))
+    
+    # Sellado OOS Estricto (Previene contaminación del período In-Sample)
+    if ini_oos < N:
+        da.iloc[:ini_oos, da.columns.get_loc("señal_h")] = "ESPERAR"
+    else:
+        da["señal_h"] = "ESPERAR"
+        
     tr = da[da["señal_h"]!="ESPERAR"].dropna(subset=["retorno_target"]).copy()
+    
     if not tr.empty:
         tr["resultado"] = np.where(((tr["señal_h"]=="COMPRAR") & (tr["retorno_target"]>0)) | ((tr["señal_h"]=="VENDER") & (tr["retorno_target"]<0)), "✅ ACIERTO", "❌ FALLO")
     rd = (da["señal_h"].map({"COMPRAR":1, "VENDER":-1, "ESPERAR":0}).replace(0, np.nan).ffill(limit=h-1).fillna(0).shift(1) * da["retorno_diario"]).dropna()
@@ -433,11 +467,7 @@ sc = {"COMPRAR":"#34d399", "VENDER":"#f87171", "ESPERAR":"#facc15"}[s_h]
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.markdown(f"<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;text-align:center'><div style='font-size:11px;color:#64748b;text-transform:uppercase'>Señal {horizonte}d</div><div style='font-size:1.7rem;font-weight:700;color:{sc}'>{s_h}</div><div style='font-size:12px;color:#64748b'>{'+' if cons_adj >= 0 else ''}{cons_adj*100:.2f}%</div></div>", unsafe_allow_html=True)
 c2.metric("Precio", f"${h['Close']:.2f}")
-
-# --- Corrección Visual VIX ---
 c3.metric(f"VIX {ci}", f"{vh:.2f}", f"{cn} (Ajuste {peso_vix}%)", delta_color="off")
-# -----------------------------
-
 c4.metric("RSI-14", f"{h['rsi']:.1f}", "Sobrecompra" if h["rsi"] > 70 else ("Sobreventa" if h["rsi"] < 30 else "Normal"), delta_color="inverse" if h["rsi"] > 70 else "normal")
 c5.metric("MACD", f"{h['macd']:.4f}", "↑ Alcista" if h["macd"] > h["macd_sig"] else "↓ Bajista", delta_color="normal" if h["macd"] > h["macd_sig"] else "inverse")
 c6.metric("R² Prom", f"{mod_res['r2_prom']*100:.1f}%", "Significativo" if mod_res["r2_prom"] >= R2_MIN else "Sin señal")
@@ -796,5 +826,5 @@ with tab6:
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v6.2** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v7.1** | Desarrollado por: **LAUTHARTE**")
 st.caption("⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. Los resultados históricos de la auditoría OOS no garantizan rendimientos futuros. Las señales del modelo son estimaciones estadísticas con incertidumbre. El uso de este sistema es bajo su propio riesgo y responsabilidad.")
