@@ -1,13 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v7.2 (Regime Filter + ATR Threshold + OBV Slope)
-
-CAMBIOS v7.2 vs v7.1:
-  1. Umbral dinámico por ATR: reemplaza el umbral fijo ±2% por uno proporcional a la volatilidad del activo
-  2. Filtro de régimen de mercado: el modelo calla en CHOP para evitar señales falsas en mercados laterales
-  3. OBV Slope reemplaza gap_oc en FEATS_M2 y FEATS_M3: feature de flujo de volumen con mayor poder predictivo a 10-30d
-  4. Fix ffill OOS contamination en calcular_auditoria_mtm: el ffill de señales ya no cruza el límite IS/OOS
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v7.3 (Ridge Regularization + OOS Sealed)
 """
 
 import streamlit as st
@@ -33,6 +27,7 @@ def check_password():
     def password_entered():
         user = st.session_state["username"]
         pwd = st.session_state["password"]
+        
         if "passwords" in st.secrets:
             if user in st.secrets["passwords"] and st.secrets["passwords"][user] == pwd:
                 st.session_state["password_correct"] = True
@@ -49,9 +44,11 @@ def check_password():
     if not st.session_state["password_correct"]:
         st.markdown("## 🔐 Acceso Restringido")
         st.markdown("Plataforma Cuantitativa Institucional. Por favor, identifíquese.")
+        
         if "passwords" not in st.secrets:
             st.error("🚨 Error Crítico: Sistema sin configuración de secrets. Contacte al administrador de arquitectura para inyectar credenciales.")
             st.stop()
+            
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.text_input("Usuario", key="username")
@@ -67,10 +64,10 @@ usuario_actual = st.session_state["logged_user"]
 # ─────────────────────────────────────────────────────────────────
 # PARÁMETROS DEL MODELO
 # ─────────────────────────────────────────────────────────────────
-LAG_INICIAL     = 51
-VENTANA_TRAIN   = 252
-F_UMBRAL        = 2.6
-R2_MIN          = 0.01
+LAG_INICIAL   = 51
+VENTANA_TRAIN = 252
+F_UMBRAL      = 2.6
+R2_MIN        = 0.01
 HORIZONTES_RANK = [10, 20, 30]
 
 VIX_CONTEXTOS = {
@@ -80,9 +77,8 @@ VIX_CONTEXTOS = {
     "PANICO":        (32, 999, 0.75, "🔴", "#f87171"),
 }
 
-# ── v7.2: gap_oc reemplazado por obv_slope en M2 y M3 ──────────
-FEATS_M1 = ["rsi",      "atr_pct", "fuerza_rel", "ret_1d",  "ret_3d"   ]
-FEATS_M2 = ["macd_var", "atr_pct", "fuerza_rel", "ret_5d",  "obv_slope"]
+FEATS_M1 = ["rsi",      "atr_pct", "fuerza_rel", "ret_1d", "ret_3d"]
+FEATS_M2 = ["macd_var", "atr_pct", "fuerza_rel", "ret_5d", "obv_slope"]
 FEATS_M3 = ["mm50_var", "mm10_vs_mm50", "vol_var20", "ret_3d", "obv_slope"]
 
 # ─────────────────────────────────────────────────────────────────
@@ -95,7 +91,7 @@ def cargar_universo_usa():
     try:
         sp_table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
         sp500 = [t.replace('.', '-') for t in sp_table['Symbol'].tolist()]
-    except Exception: pass
+    except Exception: pass 
     try:
         ndx_table = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100', storage_options=headers)[4]
         ndx = [t.replace('.', '-') for t in ndx_table['Ticker'].tolist()]
@@ -115,7 +111,7 @@ class ErrorLogger:
     def to_df(self): return pd.DataFrame(self.logs) if self.logs else pd.DataFrame(columns=["Ticker", "Motivo", "Detalle"])
 
 # ─────────────────────────────────────────────────────────────────
-# DESCARGAS
+# DESCARGAS E INDICADORES
 # ─────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=900, show_spinner=False)
 def descargar(ticker, years):
@@ -145,328 +141,302 @@ def descargar_benchmark(mercado, years):
 
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
 
-# ─────────────────────────────────────────────────────────────────
-# INDICADORES
-# ─────────────────────────────────────────────────────────────────
 def calcular_indicadores(df, bench_serie, horizonte=20):
     d = df.copy()
     c, v, o = d["Close"], d["Volume"], d["Open"]
-
-    # Benchmark sellado (sin lookahead)
+    
     if not bench_serie.empty:
         bench_safe = bench_serie.loc[:d.index[-1]].reindex(d.index, method="ffill")
         d["fuerza_rel"] = c.pct_change(20) - bench_safe.pct_change(20)
     else:
         d["fuerza_rel"] = 0.0
-
+        
     d["ema12"], d["ema26"] = ema(c, 12), ema(c, 26)
-    d["macd"]    = d["ema12"] - d["ema26"]
+    d["macd"] = d["ema12"] - d["ema26"]
     d["macd_sig"] = ema(d["macd"], 9)
     d["macd_var"] = (d["macd"] - d["macd_sig"]) / c.replace(0, np.nan)
-
+    
     diff = c.diff()
     g = diff.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
     p = (-diff).clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
-    d["rsi"] = 100 - (100 / (1 + g / p.replace(0, np.nan)))
-
+    d["rsi"] = 100 - (100 / (1 + g/p.replace(0, np.nan)))
+    
     d["mm10"], d["mm50"] = c.rolling(10).mean(), c.rolling(50).mean()
-    d["mm200"]         = c.rolling(200).mean()
-    d["mm50_var"]      = (c - d["mm50"]) / d["mm50"].replace(0, np.nan)
-    d["mm10_vs_mm50"]  = (d["mm10"] - d["mm50"]) / d["mm50"].replace(0, np.nan)
-    d["vol_var20"]     = (v - v.rolling(20).mean()) / v.rolling(20).mean()
-
+    d["mm200"]           = c.rolling(200).mean()
+    d["mm50_var"] = (c - d["mm50"]) / d["mm50"].replace(0, np.nan)
+    d["mm10_vs_mm50"] = (d["mm10"] - d["mm50"]) / d["mm50"].replace(0, np.nan)
+    d["vol_var20"] = (v - v.rolling(20).mean()) / v.rolling(20).mean()
+    
     ms, ss = c.rolling(20).mean(), c.rolling(20).std()
     d["bb_upper"], d["bb_mid"], d["bb_lower"] = ms + 2*ss, ms, ms - 2*ss
-
+    
     if "High" in d.columns:
         tr = pd.concat([(d["High"]-d["Low"]), (d["High"]-c.shift()).abs(), (d["Low"]-c.shift()).abs()], axis=1).max(axis=1)
         d["atr_pct"] = tr.ewm(alpha=1/14, adjust=False).mean() / c.replace(0, np.nan)
         lo, hi = d["Low"].rolling(14).min(), d["High"].rolling(14).max()
         d["stoch_k"] = 100 * (c - lo) / (hi - lo).replace(0, np.nan)
         d["stoch_d"] = d["stoch_k"].rolling(3).mean()
-
+    
     d["ret_1d"], d["ret_3d"], d["ret_5d"] = c.pct_change(1), c.pct_change(3), c.pct_change(5)
-    d["gap_oc"] = (c - o) / o.replace(0, np.nan)   # mantenido para display, ya no en features
-
-    # ── v7.2: OBV Slope — presión compradora/vendedora normalizada ──
+    d["gap_oc"] = (c - o) / o.replace(0, np.nan)
+    
     obv = (np.sign(c.diff()) * v).cumsum()
     obv_mean = obv.rolling(20).mean()
     obv_std  = obv.rolling(20).std().replace(0, 1)
     d["obv_slope"] = (obv - obv_mean) / obv_std
-
+    
     d["retorno_target"] = c.shift(-horizonte) / c - 1
     d["retorno_diario"] = c.pct_change()
     return d
 
-# ─────────────────────────────────────────────────────────────────
-# FILTRO DE RÉGIMEN  (v7.2)
-# ─────────────────────────────────────────────────────────────────
 def detectar_regimen(d):
-    """
-    Clasifica el régimen actual del activo en: BULL / BEAR / CHOP.
-    En CHOP, el modelo OLS no emite señal operativa (ruido > señal).
-
-    Criterios:
-      BULL  → precio > MM200 + pendiente MM200 positiva + VIX < 28
-      BEAR  → precio < MM200 + pendiente MM200 negativa
-      CHOP  → cualquier otro caso (lateralización, VIX elevado, indefinido)
-    """
     c = d["Close"]
-    if len(c) < 202:
-        return "INDEFINIDO"   # datos insuficientes → no forzar CHOP ni BULL
-
-    mm200       = d["mm200"] if "mm200" in d.columns else c.rolling(200).mean()
-    precio_hoy  = float(c.iloc[-1])
-    mm200_hoy   = float(mm200.iloc[-1])
+    if len(c) < 202: return "INDEFINIDO"
+    
+    mm200        = d["mm200"] if "mm200" in d.columns else c.rolling(200).mean()
+    precio_hoy   = float(c.iloc[-1])
+    mm200_hoy    = float(mm200.iloc[-1])
     mm200_hace20 = float(mm200.iloc[-21]) if len(mm200.dropna()) >= 21 else mm200_hoy
-    pendiente   = (mm200_hoy - mm200_hace20) / mm200_hace20 if mm200_hace20 != 0 else 0.0
-    vix_actual  = float(d["vix"].iloc[-1]) if "vix" in d.columns else 20.0
-
+    pendiente    = (mm200_hoy - mm200_hace20) / mm200_hace20 if mm200_hace20 != 0 else 0.0
+    vix_actual   = float(d["vix"].iloc[-1]) if "vix" in d.columns else 20.0
+    
     sobre_mm200 = precio_hoy > mm200_hoy
+    
+    if sobre_mm200 and pendiente > 0.001 and vix_actual < 28: return "BULL"
+    elif not sobre_mm200 and pendiente < -0.001: return "BEAR"
+    else: return "CHOP"
 
-    if sobre_mm200 and pendiente > 0.001 and vix_actual < 28:
-        return "BULL"
-    elif not sobre_mm200 and pendiente < -0.001:
-        return "BEAR"
-    else:
-        return "CHOP"
-
-# ─────────────────────────────────────────────────────────────────
-# UMBRAL DINÁMICO POR ATR  (v7.2)
-# ─────────────────────────────────────────────────────────────────
 def calcular_umbral_dinamico(d, horizonte):
-    """
-    Umbral de señal proporcional a la volatilidad del activo.
-    Un activo con ATR diario de 3% (TSLA) necesita una predicción mayor
-    que uno con ATR de 0.5% (KO) para considerarse señal operable.
-
-    Fórmula: umbral = clip(ATR_diario * sqrt(horizonte) * 0.75, 1.5%, 6%)
-    """
     atr_diario = float(d["atr_pct"].iloc[-1]) if "atr_pct" in d.columns else 0.015
     atr_horizonte = atr_diario * np.sqrt(horizonte)
     return float(np.clip(atr_horizonte * 0.75, 0.015, 0.06))
 
-# ─────────────────────────────────────────────────────────────────
-# DETECTORES HEURÍSTICOS
-# ─────────────────────────────────────────────────────────────────
 def detectores_heuristicos(df):
     c, v = df["Close"], df["Volume"]
-    bk  = bool(c.iloc[-1] >= c.rolling(50).max().iloc[-2]) if len(c) > 50 else False
-    ins = bool(v.iloc[-1] > v.rolling(20).mean().iloc[-1] * 2) if len(v) > 20 else False
-    exp = bool(c.pct_change(20).iloc[-1] > 0.15) if len(c) > 20 else False
+    bk = bool(c.iloc[-1] >= c.rolling(50).max().iloc[-2]) if len(c)>50 else False
+    ins = bool(v.iloc[-1] > v.rolling(20).mean().iloc[-1] * 2) if len(v)>20 else False
+    exp = bool(c.pct_change(20).iloc[-1] > 0.15) if len(c)>20 else False
     return bk, ins, exp
 
 def contexto_vix(vix):
-    for n, (lo, hi, f, i, col) in VIX_CONTEXTOS.items():
-        if lo <= vix < hi: return n, f, i, col
+    for n, (lo, hi, f, i, c) in VIX_CONTEXTOS.items():
+        if lo <= vix < hi: return n, f, i, c
     return "OPTIMISMO", 1.05, "🔵", "#60a5fa"
 
 # ─────────────────────────────────────────────────────────────────
 # IA GENERATIVA RESIDENTE (NLG CUANTITATIVO)
 # ─────────────────────────────────────────────────────────────────
 def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl, vix, ctx_nom, peso_vix, regimen):
-    c       = h_data.get('Close', 0)
-    rsi     = h_data.get('rsi', 50)
-    macd    = h_data.get('macd', 0)
+    c = h_data.get('Close', 0)
+    rsi = h_data.get('rsi', 50)
+    macd = h_data.get('macd', 0)
     macd_sig = h_data.get('macd_sig', 0)
-    mm50    = h_data.get('mm50', c)
-
+    mm10 = h_data.get('mm10', c)
+    mm50 = h_data.get('mm50', c)
+    
     consenso_pct = modelo_res.get('consenso', 0) * 100
-    r2_pct       = modelo_res.get('r2_prom', 0) * 100
+    r2_pct = modelo_res.get('r2_prom', 0) * 100
 
-    tendencia   = "alcista primaria" if c > mm50 else "bajista primaria"
-    mm10        = h_data.get('mm10', c)
+    tendencia = "alcista primaria" if c > mm50 else "bajista primaria"
     corto_plazo = "acelerando inercia" if c > mm10 else "perdiendo tracción"
 
-    if rsi > 70:   rsi_txt = "en zona de sobrecompra técnica (>70), sugiriendo riesgo de corrección inminente"
+    if rsi > 70: rsi_txt = "en zona de sobrecompra técnica (>70), sugiriendo riesgo de corrección inminente"
     elif rsi < 30: rsi_txt = "en zona de sobreventa (<30), indicando posible capitulación y agotamiento vendedor"
-    else:          rsi_txt = f"en niveles neutrales ({rsi:.1f}), sin extremos tensionales evidentes"
+    else: rsi_txt = f"en niveles neutrales ({rsi:.1f}), sin extremos tensionales evidentes"
 
     macd_txt = "cruzado al alza, validando momentum positivo" if macd > macd_sig else "cruzado a la baja, confirmando presión vendedora"
 
     flags = []
-    if bk:   flags.append("ruptura de máximos (breakout)")
+    if bk: flags.append("ruptura de máximos (breakout)")
     if inst: flags.append("acumulación de volumen anormal")
     if expl: flags.append("momentum explosivo de corto plazo")
+    
     flags_txt = f" Desde el prisma estructural, se detecta {', '.join(flags)}." if flags else ""
-
     vix_txt = f"El entorno macro registra volatilidad de {ctx_nom} (VIX: {vix:.2f}), configurado con una ponderación de influencia del {peso_vix}%."
 
-    # Texto de régimen
     reg_map = {
         "BULL":       "🟢 Régimen BULL (precio sobre MM200, pendiente positiva, VIX controlado).",
         "BEAR":       "🔴 Régimen BEAR (precio bajo MM200, pendiente negativa).",
         "CHOP":       "🟡 Régimen CHOP (mercado lateral/indefinido) — señal OLS suprimida preventivamente.",
-        "INDEFINIDO": "⚪ Régimen INDEFINIDO (datos insuficientes para clasificar).",
+        "INDEFINIDO": "⚪ Régimen INDEFINIDO (datos insuficientes para clasificar)."
     }
     reg_txt = reg_map.get(regimen, "")
 
     if regimen == "CHOP":
         veredicto = "El motor detecta **RÉGIMEN CHOP**. La señal OLS fue suprimida: en mercados laterales el modelo genera ruido sistémico. Postura forzada: **ESPERAR**."
-    elif consenso_pct > 2.0:
-        veredicto = f"El ensamblaje de regresión dicta postura **COMPRADORA**, proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días."
-    elif consenso_pct < -2.0:
-        veredicto = f"El ensamblaje de regresión exige **LIQUIDAR** o mantener postura **VENDEDORA**, proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días."
-    else:
-        veredicto = f"El motor dicta postura **NEUTRAL (ESPERAR)**. No se detecta asimetría estadística operable ({consenso_pct:+.2f}% a {horizonte} días)."
+    elif consenso_pct > 2.0: veredicto = f"El ensamblaje de regresión dicta postura **COMPRADORA**, proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días."
+    elif consenso_pct < -2.0: veredicto = f"El ensamblaje de regresión exige **LIQUIDAR** o mantener postura **VENDEDORA**, proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días."
+    else: veredicto = f"El motor dicta postura **NEUTRAL (ESPERAR)**. No se detecta asimetría estadística operable ({consenso_pct:+.2f}% a {horizonte} días)."
 
     fiabilidad = "alta" if r2_pct >= 1.0 else "marginal (posible ruido)"
-
-    texto  = f"🤖 **Diagnóstico Algorítmico Integral:**\n\n"
+    
+    texto = f"🤖 **Diagnóstico Algorítmico Integral:**\n\n"
     texto += f"**{reg_txt}**\n\n"
     texto += f"El activo **{ticker}** navega actualmente una tendencia {tendencia}, con el precio de corto plazo {corto_plazo}. "
     texto += f"Mecánicamente, el oscilador RSI opera {rsi_txt}, en confluencia con un MACD {macd_txt}."
     texto += f"{flags_txt} {vix_txt}\n\n"
     texto += f"**Conclusión OLS:** {veredicto} La fiabilidad explicativa de esta lectura es {fiabilidad} (R² Promedio: {r2_pct:.1f}%)."
+    
     return texto
 
 # ─────────────────────────────────────────────────────────────────
-# MOTOR OLS
+# MOTOR DE CÁLCULO OLS (CON RIDGE REGULARIZATION)
 # ─────────────────────────────────────────────────────────────────
 def _normalizar(X_tr, x_pr):
     mu, std = X_tr.mean(axis=0), X_tr.std(axis=0)
     std[std == 0] = 1.0
-    X_norm    = (X_tr - mu) / std
+    
+    X_norm = (X_tr - mu) / std
     x_pr_norm = np.clip((x_pr - mu) / std, -4.0, 4.0)
+    
     return X_norm, x_pr_norm
 
 def _walk_forward_features(d, feats, y_f, N, ini_wf, blind_spot):
     X_f, k = d[feats].values, len(feats)
     preds, pesos = np.full(N, np.nan), np.full(N, 0.0)
+    
+    lam = 1.0 # Ridge Penalty Factor
+    
     for i in range(ini_wf, N):
-        fn  = i - blind_spot
+        fn = i - blind_spot
         in_ = max(LAG_INICIAL, fn - VENTANA_TRAIN)
         Xt_v, yt_v = X_f[in_:fn], y_f[in_:fn]
         mask = np.all(np.isfinite(Xt_v), axis=1) & np.isfinite(yt_v)
+        
         if mask.sum() < 50 or not np.all(np.isfinite(X_f[i])): continue
+        
         Xn, xn = _normalizar(Xt_v[mask], X_f[i])
-        X_mat  = np.column_stack([Xn, np.ones(mask.sum())])
-        x_vec  = np.append(xn, 1.0)
-        cfs, _, _, _ = np.linalg.lstsq(X_mat, yt_v[mask], rcond=None)
-        yp  = X_mat @ cfs
+        
+        X_mat = np.column_stack([Xn, np.ones(mask.sum())])
+        x_vec = np.append(xn, 1.0)
+        
+        # ── RIDGE REGULARIZATION ──
+        k_features_intercept = X_mat.shape[1]
+        I_mod = np.eye(k_features_intercept)
+        I_mod[-1, -1] = 0 # No penalizar intercepto
+        
+        X_ridge = np.vstack([X_mat, np.sqrt(lam) * I_mod])
+        y_ridge = np.concatenate([yt_v[mask], np.zeros(k_features_intercept)])
+        
+        try: cfs, _, _, _ = np.linalg.lstsq(X_ridge, y_ridge, rcond=None)
+        except: continue
+        # ──────────────────────────
+        
+        yp = X_mat @ cfs
         sst = np.sum((yt_v[mask] - yt_v[mask].mean())**2)
         if sst <= 0: continue
         r2c = 1.0 - np.sum((yt_v[mask] - yp)**2) / sst
         r2a = 1.0 - (1.0 - r2c) * (mask.sum()-1) / (mask.sum()-k-1)
-        if r2c <= 0 or (r2c/k)/((1.0-r2c)/(mask.sum()-k-1)) < F_UMBRAL or r2a < R2_MIN: continue
+        if r2c<=0 or (r2c/k)/((1.0-r2c)/(mask.sum()-k-1)) < F_UMBRAL or r2a < R2_MIN: continue
         preds[i], pesos[i] = float(x_vec @ cfs), r2a
+        
     return float(preds[-1]) if np.isfinite(preds[-1]) else 0.0, preds, float(pesos[-1]), pesos
 
 def ejecutar_modelo(d, h):
     vacio = dict(consenso=0, r2_prom=0, pred_rsi=0, pred_macd=0, pred_medias=0, r2_rsi=0, r2_macd=0, r2_medias=0)
+    
     blind_spot_dinamico = h
     ini = LAG_INICIAL + VENTANA_TRAIN + blind_spot_dinamico
-    N   = len(d)
+    N = len(d)
+    
     if N < ini + 10: return vacio, d
-
+    
     yf_target = d["retorno_target"].values
     p1, h1, w1, pw1 = _walk_forward_features(d, FEATS_M1, yf_target, N, ini, blind_spot_dinamico)
     p2, h2, w2, pw2 = _walk_forward_features(d, FEATS_M2, yf_target, N, ini, blind_spot_dinamico)
     p3, h3, w3, pw3 = _walk_forward_features(d, FEATS_M3, yf_target, N, ini, blind_spot_dinamico)
-
-    sum_w = w1 + w2 + w3
-    res = dict(
-        consenso  = round((p1*w1 + p2*w2 + p3*w3) / sum_w, 6) if sum_w > 0 else 0.0,
-        r2_prom   = round(sum_w / sum(1 for w in [w1,w2,w3] if w > 0), 4) if sum_w > 0 else 0.0,
-        pred_rsi  = p1, pred_macd=p2, pred_medias=p3,
-        r2_rsi    = w1, r2_macd=w2,   r2_medias=w3
-    )
+    
+    sum_w = w1+w2+w3
+    res = dict(consenso=round((p1*w1+p2*w2+p3*w3)/sum_w, 6) if sum_w>0 else 0.0, 
+               r2_prom=round(sum_w/sum(1 for w in [w1,w2,w3] if w>0), 4) if sum_w>0 else 0.0,
+               pred_rsi=p1, pred_macd=p2, pred_medias=p3, r2_rsi=w1, r2_macd=w2, r2_medias=w3)
     p_h = pw1 + pw2 + pw3
     with np.errstate(divide="ignore", invalid="ignore"):
-        d["consenso_raw"] = np.where(
-            p_h > 0,
-            (np.nan_to_num(h1)*pw1 + np.nan_to_num(h2)*pw2 + np.nan_to_num(h3)*pw3) / p_h,
-            np.nan
-        )
+        d["consenso_raw"] = np.where(p_h > 0, (np.nan_to_num(h1)*pw1 + np.nan_to_num(h2)*pw2 + np.nan_to_num(h3)*pw3) / p_h, np.nan)
     return res, d
 
 def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
     blind_spot_max = max(HORIZONTES_RANK)
     ini = LAG_INICIAL + VENTANA_TRAIN + blind_spot_max
-    N   = len(d)
+    N = len(d)
+    
     if N < ini + 10: return None
-
-    c  = d["Close"]
-    Ym = np.column_stack([
-        (c.shift(-10)/c-1).values,
-        (c.shift(-20)/c-1).values,
-        (c.shift(-30)/c-1).values
-    ])
-
+    c = d["Close"]
+    Ym = np.column_stack([(c.shift(-10)/c-1).values, (c.shift(-20)/c-1).values, (c.shift(-30)/c-1).values])
+    
+    lam = 1.0 # Ridge Penalty Factor
+    
     def wf(f):
         Xf, k = d[f].values, len(f)
         pm, wm = np.full((N, 3), np.nan), np.zeros((N, 3))
         for i in range(ini, N):
-            fn     = i - blind_spot_max
+            fn = i - blind_spot_max
             st_idx = max(LAG_INICIAL, fn - VENTANA_TRAIN)
             Xv, Yv = Xf[st_idx:fn], Ym[st_idx:fn]
             m = np.all(np.isfinite(Xv), 1) & np.all(np.isfinite(Yv), 1)
-            if m.sum() < 50 or not np.all(np.isfinite(Xf[i])): continue
+            
+            if m.sum()<50 or not np.all(np.isfinite(Xf[i])): continue
+            
             Xn, xn = _normalizar(Xv[m], Xf[i])
-            Xmat   = np.column_stack([Xn, np.ones(m.sum())])
-            xvec   = np.append(xn, 1.0)
-            try: cfs, _, _, _ = np.linalg.lstsq(Xmat, Yv[m], rcond=None)
-            except: continue
+            Xmat = np.column_stack([Xn, np.ones(m.sum())])
+            xvec = np.append(xn, 1.0)
+            
+            k_features_intercept = Xmat.shape[1]
+            I_mod = np.eye(k_features_intercept)
+            I_mod[-1, -1] = 0
+            
+            X_ridge = np.vstack([Xmat, np.sqrt(lam) * I_mod])
+            
             for j in range(3):
-                yp, ytj = Xmat @ cfs[:, j], Yv[m][:, j]
+                y_ridge = np.concatenate([Yv[m][:, j], np.zeros(k_features_intercept)])
+                try: cfs, _, _, _ = np.linalg.lstsq(X_ridge, y_ridge, rcond=None)
+                except: continue
+                
+                yp, ytj = Xmat @ cfs, Yv[m][:, j]
                 sst = np.sum((ytj - ytj.mean())**2)
-                if sst <= 0: continue
-                r2c = 1.0 - np.sum((ytj - yp)**2) / sst
-                r2a = 1.0 - (1.0-r2c) * (m.sum()-1) / (m.sum()-k-1)
-                if r2c > 0 and (r2c/k)/((1.0-r2c)/(m.sum()-k-1)) >= F_UMBRAL and r2a >= R2_MIN:
-                    pm[i, j], wm[i, j] = float(xvec @ cfs[:, j]), r2a
+                if sst<=0: continue
+                r2c = 1.0 - np.sum((ytj - yp)**2)/sst
+                r2a = 1.0 - (1.0-r2c)*(m.sum()-1)/(m.sum()-k-1)
+                if r2c>0 and (r2c/k)/((1.0-r2c)/(m.sum()-k-1))>=F_UMBRAL and r2a>=R2_MIN:
+                    pm[i, j], wm[i, j] = float(xvec @ cfs), r2a
         return pm, wm
-
-    p1, w1 = wf(FEATS_M1)
-    p2, w2 = wf(FEATS_M2)
-    p3, w3 = wf(FEATS_M3)
-
+    
+    p1, w1 = wf(FEATS_M1); p2, w2 = wf(FEATS_M2); p3, w3 = wf(FEATS_M3)
     vh = float(d["vix"].iloc[-1]) if "vix" in d.columns else 18.0
     _, cf_base, _, _ = contexto_vix(vh)
+    
     cf_adj = 1.0 + (cf_base - 1.0) * (peso_vix / 100.0)
-
+    
     fz, r2 = [], []
     for j in range(3):
         ts = w1[-1,j] + w2[-1,j] + w3[-1,j]
-        fz.append(
-            ((np.nan_to_num(p1[-1,j])*w1[-1,j] + np.nan_to_num(p2[-1,j])*w2[-1,j] + np.nan_to_num(p3[-1,j])*w3[-1,j]) / ts * cf_adj)
-            if ts > 0 else 0.0
-        )
-        r2.append((ts / sum(1 for w in [w1[-1,j], w2[-1,j], w3[-1,j]] if w > 0)) if ts > 0 else 0.0)
-
+        fz.append(((np.nan_to_num(p1[-1,j])*w1[-1,j] + np.nan_to_num(p2[-1,j])*w2[-1,j] + np.nan_to_num(p3[-1,j])*w3[-1,j])/ts*cf_adj) if ts>0 else 0.0)
+        r2.append((ts/sum(1 for w in [w1[-1,j],w2[-1,j],w3[-1,j]] if w>0)) if ts>0 else 0.0)
+    
     if max(r2) < R2_MIN: return None
-
-    # ── v7.2: umbral dinámico en ranking también ──────────────────
+    
     atr_diario = float(d["atr_pct"].iloc[-1]) if "atr_pct" in d.columns else 0.015
     umbral_mt  = float(np.clip(atr_diario * np.sqrt(20) * 0.75, 0.015, 0.06))
 
-    vc  = sum(1 for f in fz if f >  umbral_mt)
-    vv  = sum(1 for f in fz if f < -umbral_mt)
-    fm  = float(np.mean(fz))
-    s   = ("COMPRA FUERTE (3/3)" if vc == 3
-           else ("COMPRAR"          if vc >= 2 and fm >  umbral_mt
-           else ("VENTA FUERTE (3/3)" if vv == 3
-           else ("VENDER"            if vv >= 2 and fm < -umbral_mt
-           else "ESPERAR / MIXTO"))))
-
+    vc = sum(1 for f in fz if f >  umbral_mt)
+    vv = sum(1 for f in fz if f < -umbral_mt)
+    fm = float(np.mean(fz))
+    s  = ("COMPRA FUERTE (3/3)" if vc == 3 else ("COMPRAR" if vc >= 2 and fm > umbral_mt else ("VENTA FUERTE (3/3)" if vv == 3 else ("VENDER" if vv >= 2 and fm < -umbral_mt else "ESPERAR / MIXTO"))))
+    
     pw20 = w1[:,1] + w2[:,1] + w3[:,1]
     with np.errstate(divide="ignore", invalid="ignore"):
-        cons_h20 = np.where(
-            pw20 > 0,
-            (np.nan_to_num(p1[:,1])*w1[:,1] + np.nan_to_num(p2[:,1])*w2[:,1] + np.nan_to_num(p3[:,1])*w3[:,1]) / pw20,
-            np.nan
-        )
+        cons_h20 = np.where(pw20 > 0, (np.nan_to_num(p1[:,1])*w1[:,1] + np.nan_to_num(p2[:,1])*w2[:,1] + np.nan_to_num(p3[:,1])*w3[:,1]) / pw20, np.nan)
 
-    conds_vix = ([d["vix"]<15, (d["vix"]>=15)&(d["vix"]<24), (d["vix"]>=24)&(d["vix"]<32), d["vix"]>=32]
-                 if "vix" in d.columns else [np.zeros(N, bool)]*4)
+    conds_vix = [d["vix"]<15, (d["vix"]>=15)&(d["vix"]<24), (d["vix"]>=24)&(d["vix"]<32), d["vix"]>=32] if "vix" in d.columns else [np.zeros(N,bool)]*4
     base_factors = np.select(conds_vix, [1.0, 1.05, 0.9, 0.75], default=1.0)
-    adj_factors  = 1.0 + (base_factors - 1.0) * (peso_vix / 100.0)
-    cons_f20     = cons_h20 * adj_factors
-    sig_raw      = np.where(cons_f20 > umbral_mt, 1, np.where(cons_f20 < -umbral_mt, -1, 0))
+    adj_factors = 1.0 + (base_factors - 1.0) * (peso_vix / 100.0)
+    cons_f20 = cons_h20 * adj_factors
+    sig_raw = np.where(cons_f20 > umbral_mt, 1, np.where(cons_f20 < -umbral_mt, -1, 0))
 
+    # Aislamiento OOS Estricto para el Win Rate
     oos_mask = np.arange(N) >= ini
-    mask_t   = (sig_raw != 0) & np.isfinite(Ym[:,1]) & oos_mask
-
+    mask_t = (sig_raw != 0) & np.isfinite(Ym[:,1]) & oos_mask
+    
     strat_r = (pd.Series(sig_raw).replace(0, np.nan).ffill(limit=19).fillna(0).shift(1) * d["retorno_diario"].values).dropna()
     met = {"sharpe": 0.0, "sortino": 0.0, "max_dd": 0.0}
     if len(strat_r) > 5:
@@ -476,25 +446,13 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
         eq = (1 + strat_r).cumprod()
         met["max_dd"] = float(((eq - eq.cummax()) / eq.cummax()).min())
 
-    wr = (float(
-        (((sig_raw[mask_t] == 1) & (Ym[:,1][mask_t] > 0)) |
-         ((sig_raw[mask_t] == -1) & (Ym[:,1][mask_t] < 0))).sum() / mask_t.sum()
-    ) if mask_t.sum() > 0 else 0.0)
+    wr = float((((sig_raw[mask_t] == 1) & (Ym[:,1][mask_t] > 0)) | ((sig_raw[mask_t] == -1) & (Ym[:,1][mask_t] < 0))).sum() / mask_t.sum()) if mask_t.sum() > 0 else 0.0
 
-    return {
-        "señal": s, "f_10d": round(fz[0], 4), "f_20d": round(fz[1], 4), "f_30d": round(fz[2], 4),
-        "fuerza_media": round(fm, 4), "r2_medio": round(float(np.mean(r2)), 4),
-        "win_rate": wr, "sharpe_oos": round(met["sharpe"], 2),
-        "sortino_oos": round(met["sortino"], 2), "max_dd_oos": round(met["max_dd"], 4),
-        "umbral_usado": round(umbral_mt, 4)
-    }
+    return {"señal": s, "f_10d": round(fz[0], 4), "f_20d": round(fz[1], 4), "f_30d": round(fz[2], 4), "fuerza_media": round(fm, 4), "r2_medio": round(float(np.mean(r2)), 4), "win_rate": wr, "sharpe_oos": round(met["sharpe"], 2), "sortino_oos": round(met["sortino"], 2), "max_dd_oos": round(met["max_dd"], 4), "umbral_usado": round(umbral_mt, 4)}
 
-# ─────────────────────────────────────────────────────────────────
-# AUDITORÍA OOS
-# ─────────────────────────────────────────────────────────────────
 def calcular_auditoria_mtm(d, vix_s, h, peso_vix, umbral):
-    da  = d.copy()
-    N   = len(da)
+    da = d.copy()
+    N  = len(da)
     ini_oos = LAG_INICIAL + VENTANA_TRAIN + h
 
     da["vix"] = vix_s.reindex(da.index, method="ffill")
@@ -503,7 +461,6 @@ def calcular_auditoria_mtm(d, vix_s, h, peso_vix, umbral):
     adj_factors  = 1.0 + (base_factors - 1.0) * (peso_vix / 100.0)
     da["consenso_final"] = da["consenso_raw"] * adj_factors
 
-    # Umbral dinámico también en auditoría
     da["señal_h"] = np.where(
         da["consenso_final"] >  umbral, "COMPRAR",
         np.where(da["consenso_final"] < -umbral, "VENDER", "ESPERAR")
@@ -523,9 +480,7 @@ def calcular_auditoria_mtm(d, vix_s, h, peso_vix, umbral):
             "✅ ACIERTO", "❌ FALLO"
         )
 
-    # ── v7.2: fix ffill OOS — la propagación de señal respeta el límite IS/OOS ──
     senial_num = da["señal_h"].map({"COMPRAR": 1, "VENDER": -1, "ESPERAR": 0})
-    # Silenciar señales IS antes de propagar
     senial_num.iloc[:ini_oos] = 0
     rd = (senial_num.replace(0, np.nan).ffill(limit=h-1).fillna(0).shift(1) * da["retorno_diario"]).dropna()
 
@@ -561,9 +516,7 @@ with st.sidebar:
     anios    = st.slider("Años historia", 2, 10, 3)
     horizonte = st.slider("Horizonte (días)", 5, 60, 20, step=5)
     st.markdown("---")
-    peso_vix = st.slider("Ponderación VIX (%)", 0, 100,
-                         100 if "Unidos" in mercado else 30, step=10,
-                         help="0% ignora el VIX. 100% aplica el multiplicador institucional completo.")
+    peso_vix = st.slider("Ponderación VIX (%)", 0, 100, 100 if "Unidos" in mercado else 30, step=10, help="0% ignora el VIX. 100% aplica el multiplicador institucional.")
     show_bb    = st.checkbox("Bandas Bollinger", True)
     show_vol   = st.checkbox("Volumen", True)
     show_stoch = st.checkbox("Estocástico %K/%D", False)
@@ -599,11 +552,9 @@ cn, cf_base, ci, _ = contexto_vix(vh)
 cf_adj   = 1.0 + (cf_base - 1.0) * (peso_vix / 100.0)
 cons_adj = mod_res["consenso"] * cf_adj
 
-# ── v7.2: régimen + umbral dinámico ──────────────────────────────
 regimen = detectar_regimen(d)
 umbral  = calcular_umbral_dinamico(d, horizonte)
 
-# En CHOP: forzar ESPERAR independientemente del consenso
 if regimen == "CHOP":
     s_h      = "ESPERAR"
     cons_adj = 0.0
@@ -612,7 +563,6 @@ else:
 
 sc = {"COMPRAR": "#34d399", "VENDER": "#f87171", "ESPERAR": "#facc15"}[s_h]
 
-# Colores de régimen
 reg_color = {"BULL": "#34d399", "BEAR": "#f87171", "CHOP": "#facc15", "INDEFINIDO": "#94a3b8"}
 reg_icon  = {"BULL": "🟢", "BEAR": "🔴", "CHOP": "🟡", "INDEFINIDO": "⚪"}
 
@@ -633,7 +583,6 @@ c5.metric("MACD", f"{last['macd']:.4f}",
           "↑ Alcista" if last["macd"] > last["macd_sig"] else "↓ Bajista",
           delta_color="normal" if last["macd"] > last["macd_sig"] else "inverse")
 
-# ── v7.2: régimen mostrado como métrica ──────────────────────────
 c6.markdown(
     f"<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;text-align:center'>"
     f"<div style='font-size:11px;color:#64748b;text-transform:uppercase'>Régimen</div>"
@@ -795,7 +744,6 @@ with tab5:
             d_base = calcular_indicadores(df_act, bench_s, 20)
             d_base["vix"] = vix_s.reindex(d_base.index, method="ffill")
 
-            # Filtro de régimen en el ranking
             reg_activo = detectar_regimen(d_base)
             if reg_activo == "CHOP":
                 logger.add(activo, "Régimen CHOP", "Señal suprimida — mercado lateral"); continue
@@ -1052,5 +1000,5 @@ with tab6:
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v7.2** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v7.3** | Desarrollado por: **LAUTHARTE**")
 st.caption("⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. Los resultados históricos de la auditoría OOS no garantizan rendimientos futuros. Las señales del modelo son estimaciones estadísticas con incertidumbre. El uso de este sistema es bajo su propio riesgo y responsabilidad.")
