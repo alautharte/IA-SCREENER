@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA Residente v5.3 (Stable)
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA Residente · Ponderación VIX Dinámica v5.4
 """
 
 import streamlit as st
@@ -68,7 +68,6 @@ VENTANA_TRAIN = 252
 BLIND_SPOT    = 20
 F_UMBRAL      = 2.6
 R2_MIN        = 0.01
-HORIZONTES_RANK = [10, 20, 30]
 
 VIX_CONTEXTOS = {
     "EUFORIA":       (0,  15,  1.00, "🟢", "#34d399"),
@@ -198,7 +197,7 @@ def contexto_vix(vix):
 # ─────────────────────────────────────────────────────────────────
 # IA GENERATIVA RESIDENTE (NLG CUANTITATIVO)
 # ─────────────────────────────────────────────────────────────────
-def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl, fibo, vix, ctx_nom):
+def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl, fibo, vix, ctx_nom, peso_vix):
     c = h_data['Close']
     rsi = h_data['rsi']
     macd, macd_sig = h_data['macd'], h_data['macd_sig']
@@ -223,7 +222,7 @@ def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl
     if fibo: flags.append("soporte activo en zona Golden Pocket de Fibonacci")
     
     flags_txt = f" Desde el prisma estructural, se detecta {', '.join(flags)}." if flags else ""
-    vix_txt = f"El entorno macro registra volatilidad de {ctx_nom} (VIX: {vix:.2f})."
+    vix_txt = f"El entorno macro registra volatilidad de {ctx_nom} (VIX: {vix:.2f}), configurado con una ponderación de influencia del {peso_vix}%."
 
     if consenso_pct > 2.0: veredicto = f"El ensamblaje de regresión dicta postura **COMPRADORA**, proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días."
     elif consenso_pct < -2.0: veredicto = f"El ensamblaje de regresión exige **LIQUIDAR** o mantener postura **VENDEDORA**, proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días."
@@ -284,7 +283,7 @@ def ejecutar_modelo(d, h):
         d["consenso_raw"] = np.where(p_h > 0, (np.nan_to_num(h1)*pw1 + np.nan_to_num(h2)*pw2 + np.nan_to_num(h3)*pw3) / p_h, np.nan)
     return res, d
 
-def ejecutar_modelo_multitemporal(d, vix_s, log, tk):
+def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
     N, ini = len(d), LAG_INICIAL + VENTANA_TRAIN + BLIND_SPOT
     if N < ini + 10: return None
     c = d["Close"]
@@ -313,25 +312,29 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk):
     
     p1, w1 = wf(FEATS_M1); p2, w2 = wf(FEATS_M2); p3, w3 = wf(FEATS_M3)
     vh = float(d["vix"].iloc[-1]) if "vix" in d.columns else 18.0
-    _, cf, _, _ = contexto_vix(vh)
+    _, cf_base, _, _ = contexto_vix(vh)
+    
+    # Ajuste matemático de la ponderación VIX
+    cf_adj = 1.0 + (cf_base - 1.0) * (peso_vix / 100.0)
     
     fz, r2 = [], []
     for j in range(3):
         ts = w1[-1,j] + w2[-1,j] + w3[-1,j]
-        fz.append(((np.nan_to_num(p1[-1,j])*w1[-1,j] + np.nan_to_num(p2[-1,j])*w2[-1,j] + np.nan_to_num(p3[-1,j])*w3[-1,j])/ts*cf) if ts>0 else 0.0)
+        fz.append(((np.nan_to_num(p1[-1,j])*w1[-1,j] + np.nan_to_num(p2[-1,j])*w2[-1,j] + np.nan_to_num(p3[-1,j])*w3[-1,j])/ts*cf_adj) if ts>0 else 0.0)
         r2.append((ts/sum(1 for w in [w1[-1,j],w2[-1,j],w3[-1,j]] if w>0)) if ts>0 else 0.0)
     
     if max(r2) < R2_MIN: return None
     vc, vv, fm = sum(1 for f in fz if f>0.02), sum(1 for f in fz if f<-0.02), float(np.mean(fz))
     s = "COMPRA FUERTE (3/3)" if vc==3 else ("COMPRAR" if vc>=2 and fm>0.02 else ("VENTA FUERTE (3/3)" if vv==3 else ("VENDER" if vv>=2 and fm<-0.02 else "ESPERAR / MIXTO")))
     
-    # ── BLOQUE DE MÉTRICAS OOS RESTAURADO PARA EL RANKING ──
     pw20 = w1[:,1] + w2[:,1] + w3[:,1]
     with np.errstate(divide="ignore", invalid="ignore"):
         cons_h20 = np.where(pw20 > 0, (np.nan_to_num(p1[:,1])*w1[:,1] + np.nan_to_num(p2[:,1])*w2[:,1] + np.nan_to_num(p3[:,1])*w3[:,1]) / pw20, np.nan)
 
     conds_vix = [d["vix"]<15, (d["vix"]>=15)&(d["vix"]<24), (d["vix"]>=24)&(d["vix"]<32), d["vix"]>=32] if "vix" in d.columns else [np.zeros(N,bool)]*4
-    cons_f20 = cons_h20 * np.select(conds_vix, [1.0, 1.05, 0.9, 0.75], default=1.0)
+    base_factors = np.select(conds_vix, [1.0, 1.05, 0.9, 0.75], default=1.0)
+    adj_factors = 1.0 + (base_factors - 1.0) * (peso_vix / 100.0)
+    cons_f20 = cons_h20 * adj_factors
     sig_raw = np.where(cons_f20 > 0.02, 1, np.where(cons_f20 < -0.02, -1, 0))
 
     strat_r = (pd.Series(sig_raw).replace(0, np.nan).ffill(limit=19).fillna(0).shift(1) * d["retorno_diario"].values).dropna()
@@ -346,24 +349,16 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk):
     mask_t = (sig_raw != 0) & np.isfinite(Ym[:,1])
     wr = float((((sig_raw[mask_t] == 1) & (Ym[:,1][mask_t] > 0)) | ((sig_raw[mask_t] == -1) & (Ym[:,1][mask_t] < 0))).sum() / mask_t.sum()) if mask_t.sum() > 0 else 0.0
 
-    return {
-        "señal": s, 
-        "f_10d": round(fz[0], 4), 
-        "f_20d": round(fz[1], 4), 
-        "f_30d": round(fz[2], 4), 
-        "fuerza_media": round(fm, 4), 
-        "r2_medio": round(float(np.mean(r2)), 4),
-        "win_rate": wr, 
-        "sharpe_oos": round(met["sharpe"], 2), 
-        "sortino_oos": round(met["sortino"], 2), 
-        "max_dd_oos": round(met["max_dd"], 4)
-    }
+    return {"señal": s, "f_10d": round(fz[0], 4), "f_20d": round(fz[1], 4), "f_30d": round(fz[2], 4), "fuerza_media": round(fm, 4), "r2_medio": round(float(np.mean(r2)), 4), "win_rate": wr, "sharpe_oos": round(met["sharpe"], 2), "sortino_oos": round(met["sortino"], 2), "max_dd_oos": round(met["max_dd"], 4)}
 
-def calcular_auditoria_mtm(d, vix_s, h):
+def calcular_auditoria_mtm(d, vix_s, h, peso_vix):
     da = d.copy()
     da["vix"] = vix_s.reindex(da.index, method="ffill")
     conds = [da["vix"]<15, (da["vix"]>=15)&(da["vix"]<24), (da["vix"]>=24)&(da["vix"]<32), da["vix"]>=32]
-    da["consenso_final"] = da["consenso_raw"] * np.select(conds, [1.0, 1.05, 0.9, 0.75], 1.0)
+    base_factors = np.select(conds, [1.0, 1.05, 0.9, 0.75], 1.0)
+    adj_factors = 1.0 + (base_factors - 1.0) * (peso_vix / 100.0)
+    da["consenso_final"] = da["consenso_raw"] * adj_factors
+    
     da["señal_h"] = np.where(da["consenso_final"]>0.02, "COMPRAR", np.where(da["consenso_final"]<-0.02, "VENDER", "ESPERAR"))
     tr = da[da["señal_h"]!="ESPERAR"].dropna(subset=["retorno_target"]).copy()
     if not tr.empty:
@@ -396,6 +391,7 @@ with st.sidebar:
     anios = st.slider("Años historia", 2, 10, 3)
     horizonte = st.slider("Horizonte (días)", 5, 60, 20, step=5)
     st.markdown("---")
+    peso_vix = st.slider("Ponderación VIX (%)", 0, 100, 100 if "Unidos" in mercado else 30, step=10, help="0% ignora el VIX por completo. 100% aplica el multiplicador institucional.")
     show_bb = st.checkbox("Bandas Bollinger", True)
     show_vol = st.checkbox("Volumen", True)
     show_stoch = st.checkbox("Estocástico %K/%D", False)
@@ -424,14 +420,18 @@ bk, ins, exp, fib = detectores_heuristicos(df_raw)
 
 h = d.iloc[-1]
 vh = float(h.get("vix", 18.0) or 18.0)
-cn, cf, ci, _ = contexto_vix(vh)
-cons_adj = mod_res["consenso"] * cf
+cn, cf_base, ci, _ = contexto_vix(vh)
+
+# Ajuste de ponderación en la UI principal
+cf_adj = 1.0 + (cf_base - 1.0) * (peso_vix / 100.0)
+cons_adj = mod_res["consenso"] * cf_adj
+
 s_h = "COMPRAR" if cons_adj > 0.02 else ("VENDER" if cons_adj < -0.02 else "ESPERAR")
 sc = {"COMPRAR":"#34d399", "VENDER":"#f87171", "ESPERAR":"#facc15"}[s_h]
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.markdown(f"<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;text-align:center'><div style='font-size:11px;color:#64748b;text-transform:uppercase'>Señal {horizonte}d</div><div style='font-size:1.7rem;font-weight:700;color:{sc}'>{s_h}</div><div style='font-size:12px;color:#64748b'>{'+' if cons_adj >= 0 else ''}{cons_adj*100:.2f}%</div></div>", unsafe_allow_html=True)
-c2.metric("Precio", f"${h['Close']:.2f}"); c3.metric(f"VIX {ci}", f"{vh:.2f}", cn, delta_color="off"); c4.metric("RSI-14", f"{h['rsi']:.1f}", "Sobrecompra" if h["rsi"] > 70 else ("Sobreventa" if h["rsi"] < 30 else "Normal"), delta_color="inverse" if h["rsi"] > 70 else "normal"); c5.metric("MACD", f"{h['macd']:.4f}", "↑ Alcista" if h["macd"] > h["macd_sig"] else "↓ Bajista", delta_color="normal" if h["macd"] > h["macd_sig"] else "inverse"); c6.metric("R² Prom", f"{mod_res['r2_prom']*100:.1f}%", "Significativo" if mod_res["r2_prom"] >= R2_MIN else "Sin señal")
+c2.metric("Precio", f"${h['Close']:.2f}"); c3.metric(f"VIX {ci}", f"{vh:.2f}", f"Ajuste {peso_vix}%", delta_color="off"); c4.metric("RSI-14", f"{h['rsi']:.1f}", "Sobrecompra" if h["rsi"] > 70 else ("Sobreventa" if h["rsi"] < 30 else "Normal"), delta_color="inverse" if h["rsi"] > 70 else "normal"); c5.metric("MACD", f"{h['macd']:.4f}", "↑ Alcista" if h["macd"] > h["macd_sig"] else "↓ Bajista", delta_color="normal" if h["macd"] > h["macd_sig"] else "inverse"); c6.metric("R² Prom", f"{mod_res['r2_prom']*100:.1f}%", "Significativo" if mod_res["r2_prom"] >= R2_MIN else "Sin señal")
 
 if any([bk, ins, exp, fib]):
     tags = [t for t, c in zip(["🚀 Breakout (Máx 50d)", "🏦 Acum. Inst. (Vol. 2x)", "🔥 Momentum (>15%)", "📐 Golden Pocket Fib"], [bk, ins, exp, fib]) if c]
@@ -476,9 +476,8 @@ with tab1:
     fig.update_layout(height=600 + (rows_n-1)*130, xaxis_rangeslider_visible=False, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#e2e8f0", margin=dict(t=30, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
-    # 🤖 DIAGNÓSTICO IA RESIDENTE
     st.markdown("---")
-    txt_sintesis = generar_sintesis_quant(ticker, h, mod_res, horizonte, bk, ins, exp, fib, vh, cn)
+    txt_sintesis = generar_sintesis_quant(ticker, h, mod_res, horizonte, bk, ins, exp, fib, vh, cn, peso_vix)
     st.info(txt_sintesis)
 
 # ══════════════════════ TAB 2: MODELO ══════════════════════
@@ -499,7 +498,7 @@ with tab2:
 # ══════════════════════ TAB 3: AUDITORÍA OOS ══════════════════════
 with tab3:
     st.markdown(f"### 🕵️ Auditoría Out-Of-Sample (Horizonte: {horizonte}d)")
-    tr, da, met = calcular_auditoria_mtm(d, vix_s, horizonte)
+    tr, da, met = calcular_auditoria_mtm(d, vix_s, horizonte, peso_vix)
     if tr.empty: st.info("Sin señales históricas útiles.")
     else:
         ac1, ac2, ac3, ac4, ac5, ac6, ac7 = st.columns(7)
@@ -519,7 +518,7 @@ with tab4:
     st.markdown("### 📋 Últimas 100 filas de datos")
     st.dataframe(d[[c for c in ["Close", "Volume", "rsi", "macd", "mm10", "mm50", "atr_pct", "fuerza_rel", "vix", "consenso_raw"] if c in d.columns]].tail(100).sort_index(ascending=False).style.format("{:.4f}"), use_container_width=True, height=450)
 
-# ══════════════════════ TAB 5: RANKING GLOBAL (RESTAURADO) ══════════════════════
+# ══════════════════════ TAB 5: RANKING GLOBAL ══════════════════════
 with tab5:
     st.markdown("### 🏆 Ranking Multitemporal Acelerado")
     st.markdown(f"**Universo original:** {len(lista)} activos ({mercado}). Se aplicará un filtro de liquidez y precio antes de ejecutar el cálculo matricial pesado.")
@@ -540,8 +539,7 @@ with tab5:
             
             df_act, err_m, err_d = descargar(activo, anios)
             if df_act is None:
-                logger.add(activo, err_m, err_d)
-                continue
+                logger.add(activo, err_m, err_d); continue
                 
             ult_c = df_act["Close"].iloc[-1]
             ult_v = df_act["Volume"].iloc[-20:].mean()
@@ -553,7 +551,7 @@ with tab5:
             
             d_base = calcular_indicadores(df_act, bench_s, 20)
             d_base["vix"] = vix_s.reindex(d_base.index, method="ffill")
-            mod_r = ejecutar_modelo_multitemporal(d_base, vix_s, logger, activo)
+            mod_r = ejecutar_modelo_multitemporal(d_base, vix_s, logger, activo, peso_vix)
             
             if mod_r is None: continue
             
@@ -565,18 +563,10 @@ with tab5:
             if fibo_a: tags.append("📐 Golden Pocket Fib")
 
             resultados.append({
-                "Activo": activo,
-                "Precio": round(float(ult_c), 2),
-                "Señal": mod_r["señal"],
-                "F(10d)": mod_r["f_10d"],
-                "F(20d)": mod_r["f_20d"],
-                "F(30d)": mod_r["f_30d"],
-                "Fuerza Media": mod_r["fuerza_media"],
-                "R² Medio": mod_r["r2_medio"],
-                "Win Rate": mod_r["win_rate"],
-                "Sharpe": mod_r["sharpe_oos"],
-                "Sortino": mod_r["sortino_oos"],
-                "Max DD": mod_r["max_dd_oos"],
+                "Activo": activo, "Precio": round(float(ult_c), 2), "Señal": mod_r["señal"],
+                "F(10d)": mod_r["f_10d"], "F(20d)": mod_r["f_20d"], "F(30d)": mod_r["f_30d"],
+                "Fuerza Media": mod_r["fuerza_media"], "R² Medio": mod_r["r2_medio"], "Win Rate": mod_r["win_rate"],
+                "Sharpe": mod_r["sharpe_oos"], "Sortino": mod_r["sortino_oos"], "Max DD": mod_r["max_dd_oos"],
                 "Banderas": " | ".join(tags) if tags else "—"
             })
 
@@ -592,9 +582,7 @@ with tab5:
         df_show = st.session_state["df_rank"]
         
         fr1, fr2, fr3 = st.columns(3)
-        filtro_s  = fr1.multiselect("Filtrar señal", 
-                                    ["COMPRA FUERTE (3/3)", "COMPRAR", "ESPERAR / MIXTO", "VENDER", "VENTA FUERTE (3/3)"], 
-                                    default=["COMPRA FUERTE (3/3)", "COMPRAR", "VENTA FUERTE (3/3)", "VENDER"])
+        filtro_s  = fr1.multiselect("Filtrar señal", ["COMPRA FUERTE (3/3)", "COMPRAR", "ESPERAR / MIXTO", "VENDER", "VENTA FUERTE (3/3)"], default=["COMPRA FUERTE (3/3)", "COMPRAR", "VENTA FUERTE (3/3)", "VENDER"])
         min_r2_rk = fr2.slider("R² promedio mínimo (%)", 0, 20, 1) / 100
         min_wr_rk = fr3.slider("Win Rate histórico mínimo (%)", 0, 100, 60) / 100 
 
@@ -607,12 +595,7 @@ with tab5:
             if "VENDER" in v: return "color:#f87171;font-weight:bold"
             return "color:#facc15"
         
-        st.dataframe(
-            df_show.style.map(c_senal, subset=["Señal"]).format({
-                "Precio": "${:.2f}", "F(10d)": "{:+.2%}", "F(20d)": "{:+.2%}", "F(30d)": "{:+.2%}",
-                "Fuerza Media": "{:+.2%}", "R² Medio": "{:.2%}", "Win Rate": "{:.1%}", "Max DD": "{:.1%}"
-            }), use_container_width=True, height=480, hide_index=True
-        )
+        st.dataframe(df_show.style.map(c_senal, subset=["Señal"]).format({"Precio": "${:.2f}", "F(10d)": "{:+.2%}", "F(20d)": "{:+.2%}", "F(30d)": "{:+.2%}", "Fuerza Media": "{:+.2%}", "R² Medio": "{:.2%}", "Win Rate": "{:.1%}", "Max DD": "{:.1%}"}), use_container_width=True, height=480, hide_index=True)
 
         if len(df_show) > 1:
             st.subheader("🗺️ Mapa de Calor de Factores (Z-Score)")
@@ -625,7 +608,7 @@ with tab5:
         with st.expander(f"📋 Descartados por Pre-Filtro o Estadística ({len(st.session_state['df_errores'])})", expanded=False):
             st.dataframe(st.session_state["df_errores"], use_container_width=True, hide_index=True)
 
-# ══════════════════════ TAB 6: MI CARTERA EN VIVO (RESTAURADA) ══════════════════════
+# ══════════════════════ TAB 6: MI CARTERA EN VIVO ══════════════════════
 with tab6:
     st.markdown("### 💼 Gestión de Cartera Multi-Usuario (Google Sheets)")
     st.markdown(f"Bienvenido/a, **{usuario_actual}**. Este es tu portafolio personal. Las operaciones que ingreses aquí no se mezclarán con las de otros usuarios del sistema.")
@@ -637,8 +620,7 @@ with tab6:
         df_completo = conn.read(worksheet="Sheet1")
         df_completo = df_completo.dropna(how="all") 
         
-        columnas_esperadas = ["Usuario", "Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias", "Estado", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"]
-        for col in columnas_esperadas:
+        for col in ["Usuario", "Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias", "Estado", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"]:
             if col not in df_completo.columns: df_completo[col] = None
                 
         df_completo["Estado"] = df_completo["Estado"].fillna("ABIERTA")
@@ -700,7 +682,7 @@ with tab6:
 
                     d_base = calcular_indicadores(df_act, bench_cartera, 20)
                     d_base["vix"] = vix_cartera.reindex(d_base.index, method="ffill")
-                    mod_r2 = ejecutar_modelo_multitemporal(d_base, vix_cartera, logger_cartera, row["Activo"])
+                    mod_r2 = ejecutar_modelo_multitemporal(d_base, vix_cartera, logger_cartera, row["Activo"], peso_vix)
                     senal_hoy = mod_r2["señal"] if mod_r2 else "RUIDO/DESCARTADO"
 
                     resultados_cartera.append({"Activo": row["Activo"], "Fecha Compra": row["Fecha_Compra"], "Horizonte": f"{row['Horizonte_Dias']} días", "Precio Compra": round(precio_compra, 2), "Precio Actual": round(precio_actual, 2), "P&L Actual": rendimiento, "Días Restantes": estado_tiempo, "Señal HOY": senal_hoy})
