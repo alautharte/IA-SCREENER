@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v6.1 (TypeError Fixed)
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v6.1 (UX Cartera)
 """
 
 import streamlit as st
@@ -384,11 +384,9 @@ with st.sidebar:
     mercado = st.radio("Mercado", ["🇺🇸 Estados Unidos", "🇦🇷 Argentina (Merval)"])
     lista = cargar_universo_usa() if "Unidos" in mercado else cargar_universo_arg()
     
-    # --- SISTEMA HÍBRIDO DE BÚSQUEDA ---
     ticker_catalogo = st.selectbox("Catálogo de Índices", lista)
-    ticker_manual = st.text_input("🔍 Ticker Libre (Override)", value="", help="Si el activo no está arriba (ej. NU, BABA, MELI, QQQ), escribilo acá.")
+    ticker_manual = st.text_input("🔍 Ticker Libre (Override)", value="", help="Si el activo no está arriba (ej. NU, BABA), escribilo acá.")
     ticker = ticker_manual.upper().strip() if ticker_manual.strip() != "" else ticker_catalogo
-    # -----------------------------------
 
     anios = st.slider("Años historia", 2, 10, 3)
     horizonte = st.slider("Horizonte (días)", 5, 60, 20, step=5)
@@ -749,6 +747,8 @@ with tab6:
                 del st.session_state["df_cartera_cache"] 
                 st.success(f"✅ Operación cerrada exitosamente. P&L: {resultado_final*100:+.2f}%.")
                 st.rerun()
+    else:
+        st.info("📌 No tenés posiciones activas en este momento. Usá el formulario superior para abrir una.")
 
     st.markdown("---")
     if not df_cerradas.empty:
@@ -772,6 +772,9 @@ with tab6:
             return ''
 
         st.dataframe(df_show_hist.style.map(style_historial, subset=['Resultado_Pct']).format({"Precio_Compra": "${:.2f}", "Precio_Cierre": "${:.2f}", "Resultado_Pct": "{:+.2%}"}), use_container_width=True, hide_index=True)
+    else:
+        st.markdown("#### 📜 Historial de Operaciones (Track Record)")
+        st.info("📉 Aún no tenés operaciones cerradas en tu historial. Liquida una posición activa para empezar a registrar tu Win Rate y P&L acumulado.")
 
     with st.expander("⚠️ Zona de Peligro (Precaución)", expanded=False):
         st.error("Atención: Vaciar la base de datos elimina permanentemente todas TUS posiciones abiertas y todo TU historial. No afectará a otros usuarios.")
@@ -785,5 +788,5 @@ with tab6:
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v6.0** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v6.1** | Desarrollado por: **LAUTHARTE**")
 st.caption("⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. Los resultados históricos de la auditoría OOS no garantizan rendimientos futuros. Las señales del modelo son estimaciones estadísticas con incertidumbre. El uso de este sistema es bajo su propio riesgo y responsabilidad.")
