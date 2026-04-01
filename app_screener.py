@@ -385,7 +385,15 @@ with st.sidebar:
     st.markdown("## ⚙️ Panel de Control")
     mercado = st.radio("Mercado", ["🇺🇸 Estados Unidos", "🇦🇷 Argentina (Merval)"])
     lista = cargar_universo_usa() if "Unidos" in mercado else cargar_universo_arg()
-    ticker = st.selectbox("Activo Individual", lista)
+    
+    # --- SISTEMA HÍBRIDO DE BÚSQUEDA ---
+    ticker_catalogo = st.selectbox("Catálogo de Índices", lista)
+    ticker_manual = st.text_input("🔍 Ticker Libre (Override)", value="", help="Si el activo no está arriba (ej. NU, BABA, MELI, QQQ), escribilo acá.")
+    
+    # Lógica de prioridad: Si escribís algo, pisa al catálogo. Si lo dejás vacío, usa el catálogo.
+    ticker = ticker_manual.upper().strip() if ticker_manual.strip() != "" else ticker_catalogo
+    # -----------------------------------
+    
     anios = st.slider("Años historia", 2, 10, 3)
     horizonte = st.slider("Horizonte (días)", 5, 60, 20, step=5)
     st.markdown("---")
