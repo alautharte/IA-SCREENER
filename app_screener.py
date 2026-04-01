@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v6.0 (Stable & Audited)
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v6.1 (TypeError Fixed)
 """
 
 import streamlit as st
@@ -36,7 +36,6 @@ def check_password():
             else:
                 st.session_state["password_correct"] = False
         else:
-            # FALLBACK ELIMINADO - SEGURIDAD ESTRICTA
             st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
@@ -332,7 +331,6 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
     cons_f20 = cons_h20 * adj_factors
     sig_raw = np.where(cons_f20 > 0.02, 1, np.where(cons_f20 < -0.02, -1, 0))
 
-    # Aislamiento OOS para Win Rate (Corrección Crítica 4)
     oos_mask = np.arange(N) >= ini
     mask_t = (sig_raw != 0) & np.isfinite(Ym[:,1]) & oos_mask
     
@@ -389,11 +387,9 @@ with st.sidebar:
     # --- SISTEMA HÍBRIDO DE BÚSQUEDA ---
     ticker_catalogo = st.selectbox("Catálogo de Índices", lista)
     ticker_manual = st.text_input("🔍 Ticker Libre (Override)", value="", help="Si el activo no está arriba (ej. NU, BABA, MELI, QQQ), escribilo acá.")
-    
-    # Lógica de prioridad: Si escribís algo, pisa al catálogo. Si lo dejás vacío, usa el catálogo.
     ticker = ticker_manual.upper().strip() if ticker_manual.strip() != "" else ticker_catalogo
     # -----------------------------------
-    
+
     anios = st.slider("Años historia", 2, 10, 3)
     horizonte = st.slider("Horizonte (días)", 5, 60, 20, step=5)
     st.markdown("---")
@@ -424,7 +420,7 @@ if df_raw is None: st.error(f"⚠️ {em}"); st.stop()
 d = calcular_indicadores(df_raw, bench_s, horizonte)
 d["vix"] = vix_s.reindex(d.index, method="ffill")
 mod_res, d = ejecutar_modelo(d, horizonte)
-bk, ins, exp = detectores_heuristicos(df_raw) # Fibo retirado del destructuring
+bk, ins, exp = detectores_heuristicos(df_raw)
 
 h = d.iloc[-1]
 vh = float(h.get("vix", 18.0) or 18.0)
@@ -487,7 +483,7 @@ with tab1:
     txt_sintesis = generar_sintesis_quant(ticker, h, mod_res, horizonte, bk, ins, exp, vh, cn, peso_vix)
     st.info(txt_sintesis)
 
-# ══════════════════════ TAB 2: MODELO (CON VIX CONSENSO RESTAURADO) ══════════════════════
+# ══════════════════════ TAB 2: MODELO ══════════════════════
 with tab2:
     st.markdown(f"### 🧠 Resultados LINEST Walk-Forward ({horizonte}d)")
     c = st.columns(3)
@@ -628,7 +624,6 @@ with tab6:
     from streamlit_gsheets import GSheetsConnection
     conn = st.connection("gsheets", type=GSheetsConnection)
     
-    # Manejo optimizado de estado de DB (Advertencia A)
     if "df_cartera_cache" not in st.session_state:
         try:
             df_bd = conn.read(worksheet="Sheet1")
@@ -639,9 +634,14 @@ with tab6:
 
     df_completo = st.session_state["df_cartera_cache"]
 
-    for col in ["Usuario", "Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias", "Estado", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"]:
+    columnas_esperadas = ["Usuario", "Activo", "Fecha_Compra", "Precio_Compra", "Horizonte_Dias", "Estado", "Fecha_Cierre", "Precio_Cierre", "Resultado_Pct"]
+    for col in columnas_esperadas:
         if col not in df_completo.columns: df_completo[col] = None
             
+    columnas_texto = ["Usuario", "Activo", "Fecha_Compra", "Estado", "Fecha_Cierre"]
+    for col in columnas_texto:
+        df_completo[col] = df_completo[col].astype(object)
+
     df_completo["Estado"] = df_completo["Estado"].fillna("ABIERTA")
     df_completo["Usuario"] = df_completo["Usuario"].fillna("admin")
     df_completo["Precio_Compra"] = pd.to_numeric(df_completo["Precio_Compra"], errors="coerce")
@@ -665,7 +665,7 @@ with tab6:
                 nueva_fila = pd.DataFrame([{"Usuario": usuario_actual, "Activo": n_activo, "Fecha_Compra": n_fecha.strftime("%Y-%m-%d"), "Precio_Compra": float(n_precio), "Horizonte_Dias": int(n_horiz), "Estado": "ABIERTA", "Fecha_Cierre": None, "Precio_Cierre": None, "Resultado_Pct": None}])
                 df_actualizado = pd.concat([df_completo, nueva_fila], ignore_index=True)
                 conn.update(worksheet="Sheet1", data=df_actualizado)
-                del st.session_state["df_cartera_cache"] # Invalida cache post-escritura
+                del st.session_state["df_cartera_cache"] 
                 st.success(f"✅ {n_activo} comprada e impactada para {usuario_actual}.")
                 st.rerun()
 
@@ -689,7 +689,6 @@ with tab6:
                     precio_compra = float(row["Precio_Compra"])
                     rendimiento = (precio_actual / precio_compra) - 1
                     
-                    # Parseo robusto (Advertencia B)
                     fecha_c = pd.to_datetime(row["Fecha_Compra"]).date()
                     dias_transcurridos = np.busday_count(fecha_c, hoy_fecha)
                     dias_restantes = int(row["Horizonte_Dias"]) - dias_transcurridos
@@ -704,7 +703,7 @@ with tab6:
 
                     resultados_cartera.append({"Activo": row["Activo"], "Fecha Compra": row["Fecha_Compra"], "Horizonte": f"{row['Horizonte_Dias']} días", "Precio Compra": round(precio_compra, 2), "Precio Actual": round(precio_actual, 2), "P&L Actual": rendimiento, "Días Restantes": estado_tiempo, "Señal HOY": senal_hoy})
                 except Exception as e: 
-                    st.warning(f"Error procesando {row['Activo']}: {str(e)[:50]}") # Advertencia C
+                    st.warning(f"Error procesando {row['Activo']}: {str(e)[:50]}") 
             
             barra_cartera.empty()
             if resultados_cartera:
@@ -730,7 +729,6 @@ with tab6:
         st.markdown("#### ❌ Cerrar Posición")
         with st.form("form_cierre"):
             cl1, cl2, cl3 = st.columns(3)
-            # Advertencia D: Manejo de duplicados
             df_abiertas["Label_Cierre"] = df_abiertas.apply(lambda x: f"{x['Activo']} (C: {x['Fecha_Compra']} a ${x['Precio_Compra']:.2f})", axis=1)
             label_dict = dict(zip(df_abiertas["Label_Cierre"], df_abiertas.index))
             
@@ -748,7 +746,7 @@ with tab6:
                 df_completo.at[idx_to_close, "Resultado_Pct"] = resultado_final
                 
                 conn.update(worksheet="Sheet1", data=df_completo)
-                del st.session_state["df_cartera_cache"] # Invalida cache post-escritura
+                del st.session_state["df_cartera_cache"] 
                 st.success(f"✅ Operación cerrada exitosamente. P&L: {resultado_final*100:+.2f}%.")
                 st.rerun()
 
