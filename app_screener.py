@@ -1,7 +1,7 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Golden Pocket · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA Residente · Ponderación VIX Dinámica v5.4
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · Ponderación VIX Integrada v5.5
 """
 
 import streamlit as st
@@ -68,6 +68,7 @@ VENTANA_TRAIN = 252
 BLIND_SPOT    = 20
 F_UMBRAL      = 2.6
 R2_MIN        = 0.01
+HORIZONTES_RANK = [10, 20, 30]
 
 VIX_CONTEXTOS = {
     "EUFORIA":       (0,  15,  1.00, "🟢", "#34d399"),
@@ -314,7 +315,6 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
     vh = float(d["vix"].iloc[-1]) if "vix" in d.columns else 18.0
     _, cf_base, _, _ = contexto_vix(vh)
     
-    # Ajuste matemático de la ponderación VIX
     cf_adj = 1.0 + (cf_base - 1.0) * (peso_vix / 100.0)
     
     fz, r2 = [], []
@@ -763,5 +763,5 @@ with tab6:
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v5.3** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v5.5** | Desarrollado por: **LAUTHARTE**")
 st.caption("⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. Los resultados históricos de la auditoría OOS no garantizan rendimientos futuros. Las señales del modelo son estimaciones estadísticas con incertidumbre. El uso de este sistema es bajo su propio riesgo y responsabilidad.")
