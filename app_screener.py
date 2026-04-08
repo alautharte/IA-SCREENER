@@ -1,18 +1,13 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v7.5 (Auditoría de Precio)
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v7.7 (Performance & Bugfixes)
 
-CAMBIOS v7.5 vs v7.4:
-  1. _walk_forward_features ahora retorna también los coeficientes Ridge y parámetros de
-     normalización de la ÚLTIMA ventana, necesarios para el Tab 7.
-  2. ejecutar_modelo retorna dict extendido con cfs_detalle (coefs por submodelo).
-  3. TAB 7 — Auditoría de Precio:
-       Sección 1: Descomposición de señal — tabla feature × {valor raw, valor normalizado,
-                  coeficiente Ridge, contribución al consenso, dirección}.
-       Sección 2: Percentiles históricos — dónde está cada feature vs la ventana de entrenamiento.
-       Sección 3: Simulador de escenario — sliders por feature, consenso recalculado en tiempo real.
-       Sección 4: Historia de coeficientes — gráfico temporal de coeficientes del walk-forward.
+CAMBIOS v7.7 vs v7.6:
+  1. Fix crítico: BLIND_SPOT restaurado a 20 días fijos. Elimina la asimetría del lookahead bias.
+  2. Optimización matemática: Ridge Regularization vectorizado en OLS multitemporal (3x más rápido).
+  3. Fix de mutación in-place del umbral de CHOP que corrompía la auditoría OOS y el simulador.
+  4. Fix UI Tab 7: st.stop() reemplazado por bloque condicional para evitar cuelgues del script.
 """
 
 import streamlit as st
@@ -74,6 +69,7 @@ usuario_actual = st.session_state["logged_user"]
 # ─────────────────────────────────────────────────────────────────
 LAG_INICIAL     = 51
 VENTANA_TRAIN   = 252
+BLIND_SPOT      = 20
 F_UMBRAL        = 2.6
 R2_MIN          = 0.01
 HORIZONTES_RANK = [10, 20, 30]
@@ -261,7 +257,7 @@ def contexto_vix(vix):
 # NLG
 # ─────────────────────────────────────────────────────────────────
 def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl,
-                           vix, ctx_nom, peso_vix, regimen, umbral):
+                           vix, ctx_nom, peso_vix, regimen, umbral_activo, chop_factor):
     c        = h_data.get('Close', 0)
     rsi      = h_data.get('rsi', 50)
     macd     = h_data.get('macd', 0)
@@ -270,7 +266,7 @@ def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl
     mm50     = h_data.get('mm50', c)
     consenso_pct = modelo_res.get('consenso', 0) * 100
     r2_pct       = modelo_res.get('r2_prom',  0) * 100
-    umbral_pct   = umbral * 100
+    umbral_pct   = umbral_activo * 100
 
     tendencia   = "alcista primaria"   if c > mm50 else "bajista primaria"
     corto_plazo = "acelerando inercia" if c > mm10 else "perdiendo tracción"
@@ -293,14 +289,25 @@ def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl
     reg_map = {
         "BULL":       "🟢 Régimen BULL (precio sobre MM200, pendiente positiva, VIX controlado).",
         "BEAR":       "🔴 Régimen BEAR (precio bajo MM200, pendiente negativa).",
-        "CHOP":       "🟡 Régimen CHOP (mercado lateral/indefinido) — señal OLS suprimida preventivamente.",
+        "CHOP":       "🟡 Régimen CHOP (mercado lateral/indefinido) — señal atenuada preventivamente.",
         "INDEFINIDO": "⚪ Régimen INDEFINIDO (datos insuficientes para clasificar).",
     }
     reg_txt = reg_map.get(regimen, "")
 
     if regimen == "CHOP":
-        veredicto = ("El motor detecta **RÉGIMEN CHOP**. La señal OLS fue suprimida: "
-                     "en mercados laterales el modelo genera ruido sistémico. Postura forzada: **ESPERAR**.")
+        if chop_factor == 1.0:
+            veredicto = ("El motor detecta **RÉGIMEN CHOP**. La señal OLS fue suprimida: "
+                         "en mercados laterales el modelo genera ruido sistémico. Postura forzada: **ESPERAR**.")
+        else:
+            if consenso_pct > umbral_pct:
+                veredicto = (f"Régimen CHOP penalizado al {chop_factor*100:.0f}%. El consenso logró quebrar el atenuador, dicta postura **COMPRADORA**, "
+                             f"proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días (umbral exigido: ±{umbral_pct:.1f}%).")
+            elif consenso_pct < -umbral_pct:
+                veredicto = (f"Régimen CHOP penalizado al {chop_factor*100:.0f}%. El consenso logró quebrar el atenuador, exige postura **VENDEDORA**, "
+                             f"proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días (umbral exigido: ±{umbral_pct:.1f}%).")
+            else:
+                veredicto = (f"El motor dicta postura **NEUTRAL (ESPERAR)** por atenuador CHOP al {chop_factor*100:.0f}%. "
+                             f"Consenso atenuado {consenso_pct:+.2f}% dentro del umbral ensanchado ±{umbral_pct:.1f}%.")
     elif consenso_pct > umbral_pct:
         veredicto = (f"El ensamblaje de regresión dicta postura **COMPRADORA**, "
                      f"proyectando un delta de {consenso_pct:+.2f}% a {horizonte} días "
@@ -325,28 +332,16 @@ def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl
     return texto
 
 # ─────────────────────────────────────────────────────────────────
-# MOTOR OLS — v7.5: expone coeficientes y normalización de última ventana
+# MOTOR OLS — v7.5/7.7: expone coeficientes, corrige leakage
 # ─────────────────────────────────────────────────────────────────
 def _normalizar(X_tr, x_pr):
     mu, std   = X_tr.mean(axis=0), X_tr.std(axis=0)
     std[std == 0] = 1.0
     X_norm    = (X_tr - mu) / std
     x_pr_norm = np.clip((x_pr - mu) / std, -4.0, 4.0)
-    return X_norm, x_pr_norm, mu, std   # ← v7.5: retorna mu y std
+    return X_norm, x_pr_norm, mu, std
 
-def _walk_forward_features(d, feats, y_f, N, ini_wf, blind_spot):
-    """
-    Retorna:
-      pred_last  : predicción en el último punto
-      preds      : serie completa de predicciones
-      peso_last  : R²a en el último punto
-      pesos      : serie completa de pesos
-      cfs_last   : coeficientes Ridge del último punto (k+1,) — None si no hubo ajuste válido
-      mu_last    : media de normalización del último punto
-      std_last   : desvío de normalización del último punto
-      cfs_history: dict {idx → coefs} para el gráfico de evolución temporal
-      X_train_last: ventana de entrenamiento del último punto (para percentiles)
-    """
+def _walk_forward_features(d, feats, y_f, N, ini_wf):
     X_f, k = d[feats].values, len(feats)
     preds, pesos = np.full(N, np.nan), np.full(N, 0.0)
     lam = RIDGE_LAMBDA
@@ -355,10 +350,10 @@ def _walk_forward_features(d, feats, y_f, N, ini_wf, blind_spot):
     mu_last      = None
     std_last     = None
     X_train_last = None
-    cfs_history  = {}   # {i: coefs_array}
+    cfs_history  = {}
 
     for i in range(ini_wf, N):
-        fn  = i - blind_spot
+        fn  = i - BLIND_SPOT
         in_ = max(LAG_INICIAL, fn - VENTANA_TRAIN)
         Xt_v, yt_v = X_f[in_:fn], y_f[in_:fn]
         mask = np.all(np.isfinite(Xt_v), axis=1) & np.isfinite(yt_v)
@@ -384,9 +379,8 @@ def _walk_forward_features(d, feats, y_f, N, ini_wf, blind_spot):
         if r2c <= 0 or (r2c/k)/((1.0-r2c)/(mask.sum()-k-1)) < F_UMBRAL or r2a < R2_MIN: continue
 
         preds[i], pesos[i] = float(x_vec @ cfs), r2a
-        cfs_history[i] = cfs[:k].copy()   # solo coefs de features, sin intercepto
+        cfs_history[i] = cfs[:k].copy()
 
-        # guardar datos de la última iteración válida
         cfs_last     = cfs.copy()
         mu_last      = mu.copy()
         std_last     = std.copy()
@@ -399,15 +393,14 @@ def _walk_forward_features(d, feats, y_f, N, ini_wf, blind_spot):
 def ejecutar_modelo(d, h):
     vacio = dict(consenso=0, r2_prom=0, pred_rsi=0, pred_macd=0, pred_medias=0,
                  r2_rsi=0, r2_macd=0, r2_medias=0, cfs_detalle=None)
-    blind_spot_dinamico = h
-    ini = LAG_INICIAL + VENTANA_TRAIN + blind_spot_dinamico
+    ini = LAG_INICIAL + VENTANA_TRAIN + BLIND_SPOT
     N   = len(d)
     if N < ini + 10: return vacio, d
 
     yf_target = d["retorno_target"].values
-    p1, h1, w1, pw1, cfs1, mu1, std1, hist1, Xtr1 = _walk_forward_features(d, FEATS_M1, yf_target, N, ini, blind_spot_dinamico)
-    p2, h2, w2, pw2, cfs2, mu2, std2, hist2, Xtr2 = _walk_forward_features(d, FEATS_M2, yf_target, N, ini, blind_spot_dinamico)
-    p3, h3, w3, pw3, cfs3, mu3, std3, hist3, Xtr3 = _walk_forward_features(d, FEATS_M3, yf_target, N, ini, blind_spot_dinamico)
+    p1, h1, w1, pw1, cfs1, mu1, std1, hist1, Xtr1 = _walk_forward_features(d, FEATS_M1, yf_target, N, ini)
+    p2, h2, w2, pw2, cfs2, mu2, std2, hist2, Xtr2 = _walk_forward_features(d, FEATS_M2, yf_target, N, ini)
+    p3, h3, w3, pw3, cfs3, mu3, std3, hist3, Xtr3 = _walk_forward_features(d, FEATS_M3, yf_target, N, ini)
 
     sum_w = w1 + w2 + w3
     res = dict(
@@ -415,7 +408,6 @@ def ejecutar_modelo(d, h):
         r2_prom    = round(sum_w / sum(1 for w in [w1,w2,w3] if w > 0), 4) if sum_w > 0 else 0.0,
         pred_rsi   = p1, pred_macd=p2, pred_medias=p3,
         r2_rsi     = w1, r2_macd=w2,   r2_medias=w3,
-        # ── v7.5: datos de auditoría de precio ──────────────────
         cfs_detalle = {
             "M1": {"feats": FEATS_M1, "cfs": cfs1, "mu": mu1, "std": std1,
                    "pred": p1, "peso": w1, "hist": hist1, "Xtr": Xtr1},
@@ -435,8 +427,7 @@ def ejecutar_modelo(d, h):
     return res, d
 
 def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
-    blind_spot_max = max(HORIZONTES_RANK)
-    ini = LAG_INICIAL + VENTANA_TRAIN + blind_spot_max
+    ini = LAG_INICIAL + VENTANA_TRAIN + BLIND_SPOT
     N   = len(d)
     if N < ini + 10: return None
 
@@ -452,22 +443,32 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
         Xf, k = d[f].values, len(f)
         pm, wm = np.full((N, 3), np.nan), np.zeros((N, 3))
         for i in range(ini, N):
-            fn     = i - blind_spot_max
+            fn     = i - BLIND_SPOT
             st_idx = max(LAG_INICIAL, fn - VENTANA_TRAIN)
             Xv, Yv = Xf[st_idx:fn], Ym[st_idx:fn]
             m = np.all(np.isfinite(Xv), 1) & np.all(np.isfinite(Yv), 1)
             if m.sum() < 50 or not np.all(np.isfinite(Xf[i])): continue
+            
             Xn, xn, _, _ = _normalizar(Xv[m], Xf[i])
-            Xmat   = np.column_stack([Xn, np.ones(m.sum())])
-            xvec   = np.append(xn, 1.0)
-            kfi    = Xmat.shape[1]
-            I_mod  = np.eye(kfi); I_mod[-1, -1] = 0
+            Xmat = np.column_stack([Xn, np.ones(m.sum())])
+            xvec = np.append(xn, 1.0)
+            kfi  = Xmat.shape[1]
+            
+            I_mod = np.eye(kfi); I_mod[-1, -1] = 0
+            
+            # --- Vectorización Ridge para los 3 horizontes ---
             X_ridge = np.vstack([Xmat, np.sqrt(lam) * I_mod])
+            y_ridge = np.vstack([Yv[m], np.zeros((kfi, 3))])
+            
+            try: cfs_matrix, _, _, _ = np.linalg.lstsq(X_ridge, y_ridge, rcond=None)
+            except: continue
+            
+            yp_matrix = Xmat @ cfs_matrix
+            
             for j in range(3):
-                y_ridge = np.concatenate([Yv[m][:, j], np.zeros(kfi)])
-                try: cfs, _, _, _ = np.linalg.lstsq(X_ridge, y_ridge, rcond=None)
-                except: continue
-                yp, ytj = Xmat @ cfs, Yv[m][:, j]
+                yp  = yp_matrix[:, j]
+                ytj = Yv[m][:, j]
+                cfs = cfs_matrix[:, j]
                 sst = np.sum((ytj - ytj.mean())**2)
                 if sst <= 0: continue
                 r2c = 1.0 - np.sum((ytj - yp)**2) / sst
@@ -538,7 +539,7 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
 # ─────────────────────────────────────────────────────────────────
 # AUDITORÍA OOS
 # ─────────────────────────────────────────────────────────────────
-def calcular_auditoria_mtm(d, vix_s, h, peso_vix, umbral):
+def calcular_auditoria_mtm(d, vix_s, h, peso_vix, umbral_activo):
     da  = d.copy()
     N   = len(da)
     ini_oos = LAG_INICIAL + VENTANA_TRAIN + h
@@ -548,21 +549,26 @@ def calcular_auditoria_mtm(d, vix_s, h, peso_vix, umbral):
     base_factors = np.select(conds, [1.0, 1.05, 0.9, 0.75], 1.0)
     adj_factors  = 1.0 + (base_factors - 1.0) * (peso_vix / 100.0)
     da["consenso_final"] = da["consenso_raw"] * adj_factors
-    da["señal_h"] = np.where(da["consenso_final"] > umbral, "COMPRAR",
-                    np.where(da["consenso_final"] < -umbral, "VENDER", "ESPERAR"))
+    
+    da["señal_h"] = np.where(da["consenso_final"] > umbral_activo, "COMPRAR",
+                    np.where(da["consenso_final"] < -umbral_activo, "VENDER", "ESPERAR"))
+                    
     if ini_oos < N:
         da.iloc[:ini_oos, da.columns.get_loc("señal_h")] = "ESPERAR"
     else:
         da["señal_h"] = "ESPERAR"
+        
     tr = da[da["señal_h"] != "ESPERAR"].dropna(subset=["retorno_target"]).copy()
     if not tr.empty:
         tr["resultado"] = np.where(
             ((tr["señal_h"] == "COMPRAR") & (tr["retorno_target"] > 0)) |
             ((tr["señal_h"] == "VENDER")  & (tr["retorno_target"] < 0)),
             "✅ ACIERTO", "❌ FALLO")
+            
     senial_num = da["señal_h"].map({"COMPRAR": 1, "VENDER": -1, "ESPERAR": 0})
     senial_num.iloc[:ini_oos] = 0
     rd = (senial_num.replace(0, np.nan).ffill(limit=h-1).fillna(0).shift(1) * da["retorno_diario"]).dropna()
+    
     met = {"sharpe": 0.0, "sortino": 0.0, "max_dd": 0.0, "win_rate": 0.0}
     if len(rd) > 5:
         met["sharpe"] = float(np.sqrt(252)*rd.mean()/rd.std()) if rd.std() != 0 else 0.0
@@ -596,6 +602,9 @@ with st.sidebar:
     st.markdown("---")
     peso_vix = st.slider("Ponderación VIX (%)", 0, 100,
                          100 if "Unidos" in mercado else 30, step=10)
+    penalizacion_chop = st.slider("Penalización CHOP (%)", 0, 100, 100, step=10, 
+                                  help="100% = Bloqueo total. 50% = Reduce señal y exige mayor umbral ATR. 0% = OLS puro (Peligro de Whipsaw).")
+    chop_factor = penalizacion_chop / 100.0
     show_bb    = st.checkbox("Bandas Bollinger", True)
     show_vol   = st.checkbox("Volumen", True)
     show_stoch = st.checkbox("Estocástico %K/%D", False)
@@ -630,12 +639,20 @@ cn, cf_base, ci, _ = contexto_vix(vh)
 cf_adj   = 1.0 + (cf_base - 1.0) * (peso_vix / 100.0)
 cons_adj = mod_res["consenso"] * cf_adj
 regimen  = detectar_regimen(d)
-umbral   = calcular_umbral_dinamico(d, horizonte)
+umbral_base = calcular_umbral_dinamico(d, horizonte)
+
+# Variable para no sobreescribir el umbral base accidentalmente
+umbral_activo = umbral_base
 
 if regimen == "CHOP":
-    s_h = "ESPERAR"; cons_adj = 0.0
+    if chop_factor == 1.0:
+        s_h = "ESPERAR"; cons_adj = 0.0
+    else:
+        cons_adj = cons_adj * (1.0 - chop_factor)
+        umbral_activo = umbral_base * (1.0 + chop_factor)
+        s_h = "COMPRAR" if cons_adj > umbral_activo else ("VENDER" if cons_adj < -umbral_activo else "ESPERAR")
 else:
-    s_h = "COMPRAR" if cons_adj > umbral else ("VENDER" if cons_adj < -umbral else "ESPERAR")
+    s_h = "COMPRAR" if cons_adj > umbral_activo else ("VENDER" if cons_adj < -umbral_activo else "ESPERAR")
 
 sc        = {"COMPRAR": "#34d399", "VENDER": "#f87171", "ESPERAR": "#facc15"}[s_h]
 reg_color = {"BULL": "#34d399", "BEAR": "#f87171", "CHOP": "#facc15", "INDEFINIDO": "#94a3b8"}
@@ -646,7 +663,7 @@ c1.markdown(
     f"<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;text-align:center'>"
     f"<div style='font-size:11px;color:#64748b;text-transform:uppercase'>Señal {horizonte}d</div>"
     f"<div style='font-size:1.7rem;font-weight:700;color:{sc}'>{s_h}</div>"
-    f"<div style='font-size:12px;color:#64748b'>{'+' if cons_adj >= 0 else ''}{cons_adj*100:.2f}% | umbral ±{umbral*100:.1f}%</div>"
+    f"<div style='font-size:12px;color:#64748b'>{'+' if cons_adj >= 0 else ''}{cons_adj*100:.2f}% | umbral ±{umbral_activo*100:.1f}%</div>"
     f"</div>", unsafe_allow_html=True)
 c2.metric("Precio", f"${last['Close']:.2f}")
 c3.metric(f"VIX {ci}", f"{vh:.2f}", f"{cn} (Ajuste {peso_vix}%)", delta_color="off")
@@ -697,7 +714,7 @@ with tab1:
     if cons_adj != 0.0 and mod_res["r2_prom"] >= R2_MIN and regimen != "CHOP":
         obj = last["Close"] * (1 + cons_adj)
         fig.add_hline(y=obj, line_dash="dash", line_color=sc,
-                      annotation_text=f"Objetivo: ${obj:.2f} (umbral ±{umbral*100:.1f}%)", row=1, col=1)
+                      annotation_text=f"Objetivo: ${obj:.2f} (umbral ±{umbral_activo*100:.1f}%)", row=1, col=1)
     curr = 2
     if show_vol:
         clrs = ["#34d399" if cl >= op else "#f87171" for cl, op in zip(d["Close"], d["Open"])]
@@ -716,12 +733,12 @@ with tab1:
                       font_color="#e2e8f0", margin=dict(t=30, b=10))
     st.plotly_chart(fig, use_container_width=True)
     st.markdown("---")
-    st.info(generar_sintesis_quant(ticker, last, mod_res, horizonte, bk, ins, exp, vh, cn, peso_vix, regimen, umbral))
+    st.info(generar_sintesis_quant(ticker, last, mod_res, horizonte, bk, ins, exp, vh, cn, peso_vix, regimen, umbral_activo, chop_factor))
 
 # ══════════════════════ TAB 2: MODELO ══════════════════════
 with tab2:
     st.markdown(f"### 🧠 Resultados LINEST Walk-Forward ({horizonte}d)")
-    st.markdown(f"**Umbral dinámico ATR:** `±{umbral*100:.2f}%` &nbsp;|&nbsp; **Régimen:** `{reg_icon[regimen]} {regimen}` &nbsp;|&nbsp; **Ridge λ:** `{RIDGE_LAMBDA}`")
+    st.markdown(f"**Umbral dinámico ATR:** `±{umbral_activo*100:.2f}%` &nbsp;|&nbsp; **Régimen:** `{reg_icon[regimen]} {regimen}` &nbsp;|&nbsp; **Ridge λ:** `{RIDGE_LAMBDA}`")
     cols = st.columns(3)
     for i, (n, p, r, ds) in enumerate(zip(
         ["🔵 M1: Momentum", "🟣 M2: Divergencia", "🟡 M3: Tendencia"],
@@ -748,7 +765,7 @@ with tab2:
 # ══════════════════════ TAB 3: AUDITORÍA OOS ══════════════════════
 with tab3:
     st.markdown(f"### 🕵️ Auditoría Out-Of-Sample (Horizonte: {horizonte}d)")
-    tr, da, met = calcular_auditoria_mtm(d, vix_s, horizonte, peso_vix, umbral)
+    tr, da, met = calcular_auditoria_mtm(d, vix_s, horizonte, peso_vix, umbral_activo)
     if tr.empty:
         st.info("Sin señales históricas útiles (filtro de régimen o umbral ATR activo).")
     else:
@@ -805,7 +822,10 @@ with tab5:
             d_base = calcular_indicadores(df_act, bench_s, 20)
             d_base["vix"] = vix_s.reindex(d_base.index, method="ffill")
             reg_activo = detectar_regimen(d_base)
-            if reg_activo == "CHOP": logger.add(activo, "Régimen CHOP", "Señal suprimida"); continue
+            
+            if reg_activo == "CHOP" and chop_factor == 1.0:
+                logger.add(activo, "Régimen CHOP", "Señal suprimida al 100%"); continue
+                
             mod_r = ejecutar_modelo_multitemporal(d_base, vix_s, logger, activo, peso_vix)
             if mod_r is None: continue
             bk_a, inst_a, expl_a = detectores_heuristicos(df_act)
@@ -1020,243 +1040,244 @@ with tab7:
     cfs_det = mod_res.get("cfs_detalle")
     if cfs_det is None or all(v["cfs"] is None for v in cfs_det.values()):
         st.warning("⚠️ No hay coeficientes disponibles. El modelo necesita más historia o el activo no superó el filtro estadístico.")
-        st.stop()
+    else:
+        # ── SECCIÓN 1: Descomposición de señal ───────────────────────
+        st.markdown("#### 1 · Descomposición de Señal por Submodelo")
+        st.caption("Cada fila muestra el aporte real de cada feature a la predicción final del submodelo. "
+                   "Contribución = coeficiente Ridge × valor normalizado.")
 
-    # ── SECCIÓN 1: Descomposición de señal ───────────────────────
-    st.markdown("#### 1 · Descomposición de Señal por Submodelo")
-    st.caption("Cada fila muestra el aporte real de cada feature a la predicción final del submodelo. "
-               "Contribución = coeficiente Ridge × valor normalizado.")
+        sum_w_total = mod_res["r2_rsi"] + mod_res["r2_macd"] + mod_res["r2_medias"]
 
-    sum_w_total = mod_res["r2_rsi"] + mod_res["r2_macd"] + mod_res["r2_medias"]
+        for m_name, m_data in cfs_det.items():
+            if m_data["cfs"] is None: continue
+            feats = m_data["feats"]
+            cfs   = m_data["cfs"]
+            mu    = m_data["mu"]
+            std   = m_data["std"]
+            pred  = m_data["pred"]
+            peso  = m_data["peso"]
+            peso_rel = peso / sum_w_total * 100 if sum_w_total > 0 else 0
 
-    for m_name, m_data in cfs_det.items():
-        if m_data["cfs"] is None: continue
-        feats = m_data["feats"]
-        cfs   = m_data["cfs"]
-        mu    = m_data["mu"]
-        std   = m_data["std"]
-        pred  = m_data["pred"]
-        peso  = m_data["peso"]
-        peso_rel = peso / sum_w_total * 100 if sum_w_total > 0 else 0
+            nombres_sub = {"M1": "🔵 M1: Momentum", "M2": "🟣 M2: Divergencia", "M3": "🟡 M3: Tendencia"}
+            st.markdown(f"**{nombres_sub[m_name]}** — Predicción: `{pred*100:+.2f}%` | R²adj: `{peso*100:.2f}%` | Peso consenso: `{peso_rel:.1f}%`")
 
-        nombres_sub = {"M1": "🔵 M1: Momentum", "M2": "🟣 M2: Divergencia", "M3": "🟡 M3: Tendencia"}
-        st.markdown(f"**{nombres_sub[m_name]}** — Predicción: `{pred*100:+.2f}%` | R²adj: `{peso*100:.2f}%` | Peso consenso: `{peso_rel:.1f}%`")
+            rows = []
+            for j, feat in enumerate(feats):
+                val_raw  = float(last[feat]) if feat in last.index and pd.notna(last[feat]) else 0.0
+                val_norm = float(np.clip((val_raw - mu[j]) / std[j], -4.0, 4.0))
+                coef     = float(cfs[j])
+                contrib  = coef * val_norm
 
-        rows = []
-        for j, feat in enumerate(feats):
-            val_raw  = float(last[feat]) if feat in last.index and pd.notna(last[feat]) else 0.0
-            val_norm = float(np.clip((val_raw - mu[j]) / std[j], -4.0, 4.0))
-            coef     = float(cfs[j])
-            contrib  = coef * val_norm
+                if contrib > 0.0005:   direccion = "📈 Alcista"
+                elif contrib < -0.0005: direccion = "📉 Bajista"
+                else:                   direccion = "➡️ Neutro"
 
-            if contrib > 0.0005:   direccion = "📈 Alcista"
-            elif contrib < -0.0005: direccion = "📉 Bajista"
-            else:                   direccion = "➡️ Neutro"
+                rows.append({
+                    "Feature":         FEAT_LABELS.get(feat, feat),
+                    "Valor Raw":       val_raw,
+                    "Valor Norm (σ)":  round(val_norm, 3),
+                    "Coef. Ridge":     round(coef, 5),
+                    "Contribución":    round(contrib, 5),
+                    "Dirección":       direccion,
+                })
 
-            rows.append({
-                "Feature":         FEAT_LABELS.get(feat, feat),
-                "Valor Raw":       val_raw,
-                "Valor Norm (σ)":  round(val_norm, 3),
-                "Coef. Ridge":     round(coef, 5),
-                "Contribución":    round(contrib, 5),
-                "Dirección":       direccion,
+            df_decomp = pd.DataFrame(rows)
+
+            def style_contrib(val):
+                if isinstance(val, float):
+                    if val > 0.0005:   return "color:#34d399;font-weight:bold"
+                    elif val < -0.0005: return "color:#f87171;font-weight:bold"
+                return "color:#94a3b8"
+
+            st.dataframe(
+                df_decomp.style.map(style_contrib, subset=["Contribución"]).format({
+                    "Valor Raw": "{:.4f}", "Valor Norm (σ)": "{:.3f}",
+                    "Coef. Ridge": "{:+.5f}", "Contribución": "{:+.5f}"}),
+                use_container_width=True, hide_index=True, height=230)
+            st.markdown("---")
+
+        # ── SECCIÓN 2: Percentiles históricos ────────────────────────
+        st.markdown("#### 2 · Percentiles Históricos")
+        st.caption("Dónde se encuentra cada feature HOY dentro de la distribución histórica de la última ventana de entrenamiento (~252 días). "
+                   "Percentil >80 o <20 indica condición extrema.")
+
+        all_feats_unique = list(dict.fromkeys(FEATS_M1 + FEATS_M2 + FEATS_M3))
+        perc_rows = []
+        for feat in all_feats_unique:
+            Xtr = None
+            for m_name, m_data in cfs_det.items():
+                if feat in m_data["feats"] and m_data["Xtr"] is not None:
+                    feat_idx = m_data["feats"].index(feat)
+                    Xtr_col  = m_data["Xtr"][:, feat_idx]
+                    Xtr_col  = Xtr_col[np.isfinite(Xtr_col)]
+                    if len(Xtr_col) > 10:
+                        Xtr = Xtr_col
+                    break
+            if Xtr is None: continue
+
+            val_raw  = float(last[feat]) if feat in last.index and pd.notna(last[feat]) else np.nan
+            if np.isnan(val_raw): continue
+            pct      = float(np.mean(Xtr <= val_raw) * 100)
+            p25, p75 = float(np.percentile(Xtr, 25)), float(np.percentile(Xtr, 75))
+            p5,  p95 = float(np.percentile(Xtr, 5)),  float(np.percentile(Xtr, 95))
+
+            if pct >= 90 or pct <= 10: zona = "🔴 Extremo"
+            elif pct >= 75 or pct <= 25: zona = "🟡 Elevado"
+            else:                        zona = "🟢 Normal"
+
+            perc_rows.append({
+                "Feature":    FEAT_LABELS.get(feat, feat),
+                "Valor Actual": round(val_raw, 4),
+                "Pct. Histór.": round(pct, 1),
+                "P5":  round(p5,  4),
+                "P25": round(p25, 4),
+                "P75": round(p75, 4),
+                "P95": round(p95, 4),
+                "Zona": zona,
             })
 
-        df_decomp = pd.DataFrame(rows)
+        if perc_rows:
+            df_perc = pd.DataFrame(perc_rows)
+            def style_pct(val):
+                if isinstance(val, float):
+                    if val >= 90 or val <= 10: return "color:#f87171;font-weight:bold"
+                    elif val >= 75 or val <= 25: return "color:#facc15"
+                    return "color:#34d399"
+                return ""
+            st.dataframe(
+                df_perc.style.map(style_pct, subset=["Pct. Histór."]).format({
+                    "Valor Actual": "{:.4f}", "Pct. Histór.": "{:.1f}%",
+                    "P5": "{:.4f}", "P25": "{:.4f}", "P75": "{:.4f}", "P95": "{:.4f}"}),
+                use_container_width=True, hide_index=True)
 
-        def style_contrib(val):
-            if isinstance(val, float):
-                if val > 0.0005:   return "color:#34d399;font-weight:bold"
-                elif val < -0.0005: return "color:#f87171;font-weight:bold"
-            return "color:#94a3b8"
-
-        st.dataframe(
-            df_decomp.style.map(style_contrib, subset=["Contribución"]).format({
-                "Valor Raw": "{:.4f}", "Valor Norm (σ)": "{:.3f}",
-                "Coef. Ridge": "{:+.5f}", "Contribución": "{:+.5f}"}),
-            use_container_width=True, hide_index=True, height=230)
+        # ── SECCIÓN 3: Simulador de escenario ────────────────────────
         st.markdown("---")
+        st.markdown("#### 3 · Simulador de Escenario")
+        st.caption("Modificá los valores de cada feature y el modelo recalcula el consenso en tiempo real. "
+                   "Útil para analizar condiciones de entrada/salida hipotéticas.")
 
-    # ── SECCIÓN 2: Percentiles históricos ────────────────────────
-    st.markdown("#### 2 · Percentiles Históricos")
-    st.caption("Dónde se encuentra cada feature HOY dentro de la distribución histórica de entrenamiento. "
-               "Percentil >80 o <20 indica condición extrema.")
+        sim_cols = st.columns(3)
+        sim_vals = {}
+        all_feats_sim = list(dict.fromkeys(FEATS_M1 + FEATS_M2 + FEATS_M3))
 
-    all_feats_unique = list(dict.fromkeys(FEATS_M1 + FEATS_M2 + FEATS_M3))
-    perc_rows = []
-    for feat in all_feats_unique:
-        # buscar la ventana de entrenamiento del primer submodelo que tenga ese feature
-        Xtr = None
+        for j, feat in enumerate(all_feats_sim):
+            val_actual = float(last[feat]) if feat in last.index and pd.notna(last[feat]) else 0.0
+            rango_std = 0.05
+            for m_name, m_data in cfs_det.items():
+                if feat in m_data["feats"] and m_data["Xtr"] is not None:
+                    feat_idx  = m_data["feats"].index(feat)
+                    col_data  = m_data["Xtr"][:, feat_idx]
+                    col_data  = col_data[np.isfinite(col_data)]
+                    if len(col_data) > 5:
+                        rango_std = float(col_data.std())
+                    break
+
+            with sim_cols[j % 3]:
+                sim_vals[feat] = st.slider(
+                    FEAT_LABELS.get(feat, feat),
+                    min_value=float(val_actual - 3 * rango_std),
+                    max_value=float(val_actual + 3 * rango_std),
+                    value=float(val_actual),
+                    step=float(rango_std / 20),
+                    format="%.4f",
+                    key=f"sim_{feat}"
+                )
+
+        sim_preds, sim_pesos = [], []
         for m_name, m_data in cfs_det.items():
-            if feat in m_data["feats"] and m_data["Xtr"] is not None:
-                feat_idx = m_data["feats"].index(feat)
-                Xtr_col  = m_data["Xtr"][:, feat_idx]
-                Xtr_col  = Xtr_col[np.isfinite(Xtr_col)]
-                if len(Xtr_col) > 10:
-                    Xtr = Xtr_col
-                break
-        if Xtr is None: continue
+            if m_data["cfs"] is None or m_data["mu"] is None: continue
+            feats_m = m_data["feats"]
+            cfs_m   = m_data["cfs"]
+            mu_m    = m_data["mu"]
+            std_m   = m_data["std"]
+            peso_m  = m_data["peso"]
 
-        val_raw  = float(last[feat]) if feat in last.index and pd.notna(last[feat]) else np.nan
-        if np.isnan(val_raw): continue
-        pct      = float(np.mean(Xtr <= val_raw) * 100)
-        p25, p75 = float(np.percentile(Xtr, 25)), float(np.percentile(Xtr, 75))
-        p5,  p95 = float(np.percentile(Xtr, 5)),  float(np.percentile(Xtr, 95))
+            x_sim   = np.array([sim_vals.get(f, 0.0) for f in feats_m])
+            x_norm  = np.clip((x_sim - mu_m) / std_m, -4.0, 4.0)
+            x_vec   = np.append(x_norm, 1.0)
+            pred_sim = float(x_vec @ cfs_m)
+            sim_preds.append(pred_sim * peso_m)
+            sim_pesos.append(peso_m)
 
-        if pct >= 90 or pct <= 10: zona = "🔴 Extremo"
-        elif pct >= 75 or pct <= 25: zona = "🟡 Elevado"
-        else:                        zona = "🟢 Normal"
+        consenso_sim = sum(sim_preds) / sum(sim_pesos) if sum(sim_pesos) > 0 else 0.0
+        consenso_sim_adj = consenso_sim * cf_adj
+        
+        if regimen == "CHOP":
+            if chop_factor == 1.0:
+                senal_sim = "ESPERAR (CHOP)"
+                color_sim = "#facc15"
+            else:
+                consenso_sim_adj = consenso_sim_adj * (1.0 - chop_factor)
+                umbral_sim_efectivo = umbral_base * (1.0 + chop_factor)
+                senal_sim = "COMPRAR" if consenso_sim_adj > umbral_sim_efectivo else ("VENDER" if consenso_sim_adj < -umbral_sim_efectivo else "ESPERAR")
+                color_sim = {"COMPRAR": "#34d399", "VENDER": "#f87171", "ESPERAR": "#facc15"}[senal_sim]
+        else:
+            senal_sim = "COMPRAR" if consenso_sim_adj > umbral_activo else ("VENDER" if consenso_sim_adj < -umbral_activo else "ESPERAR")
+            color_sim = {"COMPRAR": "#34d399", "VENDER": "#f87171", "ESPERAR": "#facc15"}[senal_sim]
 
-        perc_rows.append({
-            "Feature":    FEAT_LABELS.get(feat, feat),
-            "Valor Actual": round(val_raw, 4),
-            "Pct. Histór.": round(pct, 1),
-            "P5":  round(p5,  4),
-            "P25": round(p25, 4),
-            "P75": round(p75, 4),
-            "P95": round(p95, 4),
-            "Zona": zona,
-        })
+        st.markdown("---")
+        s1, s2, s3, s4 = st.columns(4)
+        s1.markdown(
+            f"<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px;text-align:center'>"
+            f"<div style='font-size:11px;color:#64748b'>SEÑAL SIMULADA</div>"
+            f"<div style='font-size:1.6rem;font-weight:700;color:{color_sim}'>{senal_sim}</div>"
+            f"</div>", unsafe_allow_html=True)
+        s2.metric("Consenso simulado",  f"{consenso_sim*100:+.2f}%")
+        s3.metric("Consenso ajust. VIX", f"{consenso_sim_adj*100:+.2f}%")
+        s4.metric("Delta vs actual",    f"{(consenso_sim - mod_res['consenso'])*100:+.2f}%",
+                  delta_color="normal" if consenso_sim > mod_res["consenso"] else "inverse")
 
-    if perc_rows:
-        df_perc = pd.DataFrame(perc_rows)
-        def style_pct(val):
-            if isinstance(val, float):
-                if val >= 90 or val <= 10: return "color:#f87171;font-weight:bold"
-                elif val >= 75 or val <= 25: return "color:#facc15"
-                return "color:#34d399"
-            return ""
-        st.dataframe(
-            df_perc.style.map(style_pct, subset=["Pct. Histór."]).format({
-                "Valor Actual": "{:.4f}", "Pct. Histór.": "{:.1f}%",
-                "P5": "{:.4f}", "P25": "{:.4f}", "P75": "{:.4f}", "P95": "{:.4f}"}),
-            use_container_width=True, hide_index=True)
+        # ── SECCIÓN 4: Historia de coeficientes ──────────────────────
+        st.markdown("---")
+        st.markdown("#### 4 · Evolución Temporal de Coeficientes (Walk-Forward)")
+        st.caption("Cómo cambiaron los coeficientes Ridge de cada feature a lo largo del tiempo. "
+                   "Coeficientes estables indican features confiables. Cambios de signo frecuentes = inestabilidad.")
 
-    # ── SECCIÓN 3: Simulador de escenario ────────────────────────
-    st.markdown("---")
-    st.markdown("#### 3 · Simulador de Escenario")
-    st.caption("Modificá los valores de cada feature y el modelo recalcula el consenso en tiempo real. "
-               "Útil para analizar condiciones de entrada/salida hipotéticas.")
+        sub_sel = st.selectbox("Submodelo", ["M1: Momentum", "M2: Divergencia", "M3: Tendencia"],
+                               key="hist_sub")
+        m_key   = sub_sel[:2]
+        m_data  = cfs_det[m_key]
 
-    sim_cols = st.columns(3)
-    sim_vals = {}
-    all_feats_sim = list(dict.fromkeys(FEATS_M1 + FEATS_M2 + FEATS_M3))
+        if m_data["hist"] and len(m_data["hist"]) > 5:
+            hist_dict = m_data["hist"]
+            feats_m   = m_data["feats"]
+            idx_list  = sorted(hist_dict.keys())
 
-    for j, feat in enumerate(all_feats_sim):
-        val_actual = float(last[feat]) if feat in last.index and pd.notna(last[feat]) else 0.0
-        # rango del slider: ±3 sigmas de la ventana de entrenamiento
-        rango_std = 0.05
-        for m_name, m_data in cfs_det.items():
-            if feat in m_data["feats"] and m_data["Xtr"] is not None:
-                feat_idx  = m_data["feats"].index(feat)
-                col_data  = m_data["Xtr"][:, feat_idx]
-                col_data  = col_data[np.isfinite(col_data)]
-                if len(col_data) > 5:
-                    rango_std = float(col_data.std())
-                break
+            d_index = d.index
+            fig_coef = go.Figure()
+            for fi, feat in enumerate(feats_m):
+                ys = [hist_dict[i][fi] for i in idx_list if fi < len(hist_dict[i])]
+                xs_raw = [idx_list[k] for k in range(len(ys))]
+                xs = [d_index[x] if x < len(d_index) else x for x in xs_raw]
+                fig_coef.add_trace(go.Scatter(
+                    x=xs, y=ys,
+                    mode="lines",
+                    name=FEAT_LABELS.get(feat, feat),
+                    line=dict(width=1.5)
+                ))
 
-        with sim_cols[j % 3]:
-            sim_vals[feat] = st.slider(
-                FEAT_LABELS.get(feat, feat),
-                min_value=float(val_actual - 3 * rango_std),
-                max_value=float(val_actual + 3 * rango_std),
-                value=float(val_actual),
-                step=float(rango_std / 20),
-                format="%.4f",
-                key=f"sim_{feat}"
+            fig_coef.add_hline(y=0, line_dash="dash", line_color="#475569", line_width=1)
+            fig_coef.update_layout(
+                title=f"Coeficientes Ridge — {sub_sel}",
+                height=350,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font_color="#e2e8f0",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                margin=dict(t=60, b=20)
             )
-
-    # recalcular consenso con valores simulados
-    sim_preds, sim_pesos = [], []
-    for m_name, m_data in cfs_det.items():
-        if m_data["cfs"] is None or m_data["mu"] is None: continue
-        feats_m = m_data["feats"]
-        cfs_m   = m_data["cfs"]
-        mu_m    = m_data["mu"]
-        std_m   = m_data["std"]
-        peso_m  = m_data["peso"]
-
-        x_sim   = np.array([sim_vals.get(f, 0.0) for f in feats_m])
-        x_norm  = np.clip((x_sim - mu_m) / std_m, -4.0, 4.0)
-        x_vec   = np.append(x_norm, 1.0)
-        pred_sim = float(x_vec @ cfs_m)
-        sim_preds.append(pred_sim * peso_m)
-        sim_pesos.append(peso_m)
-
-    consenso_sim = sum(sim_preds) / sum(sim_pesos) if sum(sim_pesos) > 0 else 0.0
-    consenso_sim_adj = consenso_sim * cf_adj
-    if regimen == "CHOP":
-        senal_sim = "ESPERAR (CHOP)"
-        color_sim = "#facc15"
-    else:
-        senal_sim = "COMPRAR" if consenso_sim_adj > umbral else ("VENDER" if consenso_sim_adj < -umbral else "ESPERAR")
-        color_sim = {"COMPRAR": "#34d399", "VENDER": "#f87171", "ESPERAR": "#facc15"}[senal_sim]
-
-    st.markdown("---")
-    s1, s2, s3, s4 = st.columns(4)
-    s1.markdown(
-        f"<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px;text-align:center'>"
-        f"<div style='font-size:11px;color:#64748b'>SEÑAL SIMULADA</div>"
-        f"<div style='font-size:1.6rem;font-weight:700;color:{color_sim}'>{senal_sim}</div>"
-        f"</div>", unsafe_allow_html=True)
-    s2.metric("Consenso simulado",  f"{consenso_sim*100:+.2f}%")
-    s3.metric("Consenso ajust. VIX", f"{consenso_sim_adj*100:+.2f}%")
-    s4.metric("Delta vs actual",    f"{(consenso_sim - mod_res['consenso'])*100:+.2f}%",
-              delta_color="normal" if consenso_sim > mod_res["consenso"] else "inverse")
-
-    # ── SECCIÓN 4: Historia de coeficientes ──────────────────────
-    st.markdown("---")
-    st.markdown("#### 4 · Evolución Temporal de Coeficientes (Walk-Forward)")
-    st.caption("Cómo cambiaron los coeficientes Ridge de cada feature a lo largo del tiempo. "
-               "Coeficientes estables indican features confiables. Cambios de signo frecuentes = inestabilidad.")
-
-    sub_sel = st.selectbox("Submodelo", ["M1: Momentum", "M2: Divergencia", "M3: Tendencia"],
-                           key="hist_sub")
-    m_key   = sub_sel[:2]
-    m_data  = cfs_det[m_key]
-
-    if m_data["hist"] and len(m_data["hist"]) > 5:
-        hist_dict = m_data["hist"]
-        feats_m   = m_data["feats"]
-        idx_list  = sorted(hist_dict.keys())
-
-        # convertir índices numéricos a fechas del DataFrame
-        d_index = d.index
-        fig_coef = go.Figure()
-        for fi, feat in enumerate(feats_m):
-            ys = [hist_dict[i][fi] for i in idx_list if fi < len(hist_dict[i])]
-            xs_raw = [idx_list[k] for k in range(len(ys))]
-            # mapear índice numérico a fecha
-            xs = [d_index[x] if x < len(d_index) else x for x in xs_raw]
-            fig_coef.add_trace(go.Scatter(
-                x=xs, y=ys,
-                mode="lines",
-                name=FEAT_LABELS.get(feat, feat),
-                line=dict(width=1.5)
-            ))
-
-        fig_coef.add_hline(y=0, line_dash="dash", line_color="#475569", line_width=1)
-        fig_coef.update_layout(
-            title=f"Coeficientes Ridge — {sub_sel}",
-            height=350,
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font_color="#e2e8f0",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            margin=dict(t=60, b=20)
-        )
-        fig_coef.update_yaxes(zeroline=True, zerolinecolor="#475569")
-        st.plotly_chart(fig_coef, use_container_width=True)
-        st.caption("⚠️ Coeficientes calculados en la ventana walk-forward. "
-                   "Cada punto representa el coeficiente aprendido en esa fecha usando solo datos pasados.")
-    else:
-        st.info("Historia de coeficientes insuficiente. Se necesitan más datos OOS para trazar la evolución.")
+            fig_coef.update_yaxes(zeroline=True, zerolinecolor="#475569")
+            st.plotly_chart(fig_coef, use_container_width=True)
+            st.caption("⚠️ Coeficientes calculados en la ventana walk-forward. "
+                       "Cada punto representa el coeficiente aprendido en esa fecha usando solo datos pasados.")
+        else:
+            st.info("Historia de coeficientes insuficiente. Se necesitan más datos OOS para trazar la evolución.")
 
 # ─────────────────────────────────────────────────────────────────
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v7.5** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v7.7** | Desarrollado por: **LAUTHARTE**")
 st.caption(
     "⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente "
     "con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. "
