@@ -1,13 +1,12 @@
 """
 app.py — Modelo IA Screener (USA & ARG)
 Motor LINEST Walk-Forward Ortogonal · OLS Multitemporal · Multi-Usuario
-Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v7.7 (Performance & Bugfixes)
+Firma: LAUTHARTE · Zoom Estructural · Diagnóstico IA · v7.8 (Nominales & Divisas)
 
-CAMBIOS v7.7 vs v7.6:
-  1. Fix crítico: BLIND_SPOT restaurado a 20 días fijos. Elimina la asimetría del lookahead bias.
-  2. Optimización matemática: Ridge Regularization vectorizado en OLS multitemporal (3x más rápido).
-  3. Fix de mutación in-place del umbral de CHOP que corrompía la auditoría OOS y el simulador.
-  4. Fix UI Tab 7: st.stop() reemplazado por bloque condicional para evitar cuelgues del script.
+CAMBIOS v7.8 vs v7.7:
+  1. Tab 6: Inclusión de cantidad de nominales (Cantidad).
+  2. Tab 6: Cálculo de Resultado_Monto (P&L absoluto) además de porcentual.
+  3. Tab 6: Separación de métricas de Track Record en USD y ARS.
 """
 
 import streamlit as st
@@ -332,7 +331,7 @@ def generar_sintesis_quant(ticker, h_data, modelo_res, horizonte, bk, inst, expl
     return texto
 
 # ─────────────────────────────────────────────────────────────────
-# MOTOR OLS — v7.5/7.7: expone coeficientes, corrige leakage
+# MOTOR OLS — v7.5/7.7
 # ─────────────────────────────────────────────────────────────────
 def _normalizar(X_tr, x_pr):
     mu, std   = X_tr.mean(axis=0), X_tr.std(axis=0)
@@ -456,7 +455,6 @@ def ejecutar_modelo_multitemporal(d, vix_s, log, tk, peso_vix):
             
             I_mod = np.eye(kfi); I_mod[-1, -1] = 0
             
-            # --- Vectorización Ridge para los 3 horizontes ---
             X_ridge = np.vstack([Xmat, np.sqrt(lam) * I_mod])
             y_ridge = np.vstack([Yv[m], np.zeros((kfi, 3))])
             
@@ -641,7 +639,6 @@ cons_adj = mod_res["consenso"] * cf_adj
 regimen  = detectar_regimen(d)
 umbral_base = calcular_umbral_dinamico(d, horizonte)
 
-# Variable para no sobreescribir el umbral base accidentalmente
 umbral_activo = umbral_base
 
 if regimen == "CHOP":
@@ -884,6 +881,7 @@ with tab6:
     st.markdown(f"Bienvenido/a, **{usuario_actual}**. Tu portafolio personal.")
     from streamlit_gsheets import GSheetsConnection
     conn = st.connection("gsheets", type=GSheetsConnection)
+    
     if "df_cartera_cache" not in st.session_state:
         try:
             df_bd = conn.read(worksheet="Sheet1")
@@ -891,35 +889,54 @@ with tab6:
         except Exception as e:
             st.error(f"Error de lectura en Sheets. Error: {e}")
             st.session_state["df_cartera_cache"] = pd.DataFrame(columns=[
-                "Usuario","Activo","Fecha_Compra","Precio_Compra","Horizonte_Dias",
-                "Estado","Fecha_Cierre","Precio_Cierre","Resultado_Pct"])
+                "Usuario","Activo","Fecha_Compra","Precio_Compra","Cantidad","Moneda",
+                "Horizonte_Dias","Estado","Fecha_Cierre","Precio_Cierre","Resultado_Pct","Resultado_Monto"])
+                
     df_completo = st.session_state["df_cartera_cache"]
-    for col in ["Usuario","Activo","Fecha_Compra","Precio_Compra","Horizonte_Dias",
-                "Estado","Fecha_Cierre","Precio_Cierre","Resultado_Pct"]:
+    
+    # Inicializar columnas nuevas si la base de datos es antigua
+    columnas_esperadas = ["Usuario","Activo","Fecha_Compra","Precio_Compra","Cantidad","Moneda",
+                          "Horizonte_Dias","Estado","Fecha_Cierre","Precio_Cierre","Resultado_Pct","Resultado_Monto"]
+    for col in columnas_esperadas:
         if col not in df_completo.columns: df_completo[col] = None
-    for col in ["Usuario","Activo","Fecha_Compra","Estado","Fecha_Cierre"]:
+
+    for col in ["Usuario","Activo","Fecha_Compra","Estado","Fecha_Cierre","Moneda"]:
         df_completo[col] = df_completo[col].astype(object)
+
     df_completo["Estado"]        = df_completo["Estado"].fillna("ABIERTA")
     df_completo["Usuario"]       = df_completo["Usuario"].fillna("admin")
     df_completo["Precio_Compra"] = pd.to_numeric(df_completo["Precio_Compra"], errors="coerce")
+    df_completo["Cantidad"]      = pd.to_numeric(df_completo["Cantidad"], errors="coerce").fillna(1)
+    df_completo["Precio_Cierre"] = pd.to_numeric(df_completo["Precio_Cierre"], errors="coerce")
     df_completo["Resultado_Pct"] = pd.to_numeric(df_completo["Resultado_Pct"], errors="coerce")
+    df_completo["Resultado_Monto"] = pd.to_numeric(df_completo["Resultado_Monto"], errors="coerce")
+
+    # Si no tiene moneda asignada, se infiere por el ticker
+    df_completo["Moneda"] = df_completo.apply(lambda x: "ARS" if str(x["Activo"]).endswith(".BA") else ("USD" if pd.isna(x["Moneda"]) else x["Moneda"]), axis=1)
+
     df_cartera  = df_completo[df_completo["Usuario"] == usuario_actual].copy()
     df_abiertas = df_cartera[df_cartera["Estado"] == "ABIERTA"].copy()
     df_cerradas = df_cartera[df_cartera["Estado"] == "CERRADA"].copy()
 
     with st.expander("➕ Abrir Nueva Posición", expanded=False):
         with st.form("form_cartera"):
-            c_act, c_precio, c_fecha, c_horiz = st.columns(4)
+            c_act, c_precio, c_cant, c_fecha, c_horiz = st.columns(5)
             tickers_validos = sorted(list(set(cargar_universo_usa() + cargar_universo_arg())))
             n_activo = c_act.selectbox("Ticker", tickers_validos)
-            n_precio = c_precio.number_input("Precio Compra ($)", min_value=0.01, step=0.5, format="%.2f")
+            n_precio = c_precio.number_input("Precio Compra", min_value=0.01, step=0.5, format="%.2f")
+            n_cant   = c_cant.number_input("Cantidad", min_value=1.0, step=1.0, value=1.0)
             n_fecha  = c_fecha.date_input("Fecha de Compra")
             n_horiz  = c_horiz.selectbox("Horizonte Objetivo", [10, 20, 30])
+            
             if st.form_submit_button("Impactar en Google Sheets") and n_activo:
-                nueva_fila = pd.DataFrame([{"Usuario": usuario_actual, "Activo": n_activo,
+                moneda_act = "ARS" if n_activo.endswith(".BA") else "USD"
+                nueva_fila = pd.DataFrame([{
+                    "Usuario": usuario_actual, "Activo": n_activo,
                     "Fecha_Compra": n_fecha.strftime("%Y-%m-%d"), "Precio_Compra": float(n_precio),
+                    "Cantidad": float(n_cant), "Moneda": moneda_act,
                     "Horizonte_Dias": int(n_horiz), "Estado": "ABIERTA",
-                    "Fecha_Cierre": None, "Precio_Cierre": None, "Resultado_Pct": None}])
+                    "Fecha_Cierre": None, "Precio_Cierre": None, "Resultado_Pct": None, "Resultado_Monto": None
+                }])
                 conn.update(worksheet="Sheet1", data=pd.concat([df_completo, nueva_fila], ignore_index=True))
                 del st.session_state["df_cartera_cache"]
                 st.success(f"✅ {n_activo} impactada para {usuario_actual}."); st.rerun()
@@ -931,15 +948,20 @@ with tab6:
             resultados_cartera = []; hoy_fecha = datetime.today().date()
             bench_cartera = descargar_benchmark(mercado, anios); vix_cartera = descargar_vix(anios)
             logger_cartera = ErrorLogger()
+            
             for idx, row in df_abiertas.iterrows():
-                barra_cartera.progress((list(df_abiertas.index).index(idx)+1)/len(df_abiertas),
-                                       text=f"Actualizando {row['Activo']}...")
+                barra_cartera.progress((list(df_abiertas.index).index(idx)+1)/len(df_abiertas), text=f"Actualizando {row['Activo']}...")
                 try:
                     df_act, _, _ = descargar(row["Activo"], 2)
                     if df_act is None: continue
                     precio_actual  = float(df_act["Close"].iloc[-1])
                     precio_compra  = float(row["Precio_Compra"])
-                    rendimiento    = (precio_actual / precio_compra) - 1
+                    cantidad_act   = float(row["Cantidad"])
+                    moneda_act     = str(row["Moneda"])
+                    
+                    rendimiento_pct  = (precio_actual / precio_compra) - 1
+                    rendimiento_monto = (precio_actual - precio_compra) * cantidad_act
+                    
                     fecha_c        = pd.to_datetime(row["Fecha_Compra"]).date()
                     dias_trans     = np.busday_count(fecha_c, hoy_fecha)
                     dias_restantes = int(row["Horizonte_Dias"]) - dias_trans
@@ -950,21 +972,28 @@ with tab6:
                     d_base["vix"] = vix_cartera.reindex(d_base.index, method="ffill")
                     mod_r2    = ejecutar_modelo_multitemporal(d_base, vix_cartera, logger_cartera, row["Activo"], peso_vix)
                     senal_hoy = mod_r2["señal"] if mod_r2 else "RUIDO/DESCARTADO"
+                    
                     resultados_cartera.append({
                         "Activo": row["Activo"], "Fecha Compra": row["Fecha_Compra"],
-                        "Horizonte": f"{row['Horizonte_Dias']} días",
-                        "Precio Compra": round(precio_compra, 2), "Precio Actual": round(precio_actual, 2),
-                        "P&L Actual": rendimiento, "Días Restantes": estado_tiempo, "Señal HOY": senal_hoy})
+                        "Moneda": moneda_act, "Cantidad": cantidad_act, "Precio Compra": round(precio_compra, 2), 
+                        "Precio Actual": round(precio_actual, 2), "P&L Pct": rendimiento_pct, 
+                        "P&L Monto": round(rendimiento_monto, 2), "Días Restantes": estado_tiempo, "Señal HOY": senal_hoy})
                 except Exception as e:
                     st.warning(f"Error procesando {row['Activo']}: {str(e)[:50]}")
+                    
             barra_cartera.empty()
             if resultados_cartera:
                 df_show_cartera = pd.DataFrame(resultados_cartera)
                 def style_cartera(row_data):
                     style = [''] * len(row_data)
-                    ipnl = row_data.index.get_loc('P&L Actual')
-                    if row_data['P&L Actual'] > 0:   style[ipnl] = 'color:#34d399;font-weight:bold'
-                    elif row_data['P&L Actual'] < 0: style[ipnl] = 'color:#f87171;font-weight:bold'
+                    ipnl = row_data.index.get_loc('P&L Pct')
+                    imonto = row_data.index.get_loc('P&L Monto')
+                    if row_data['P&L Pct'] > 0:   
+                        style[ipnl] = 'color:#34d399;font-weight:bold'
+                        style[imonto] = 'color:#34d399;font-weight:bold'
+                    elif row_data['P&L Pct'] < 0: 
+                        style[ipnl] = 'color:#f87171;font-weight:bold'
+                        style[imonto] = 'color:#f87171;font-weight:bold'
                     idias = row_data.index.get_loc('Días Restantes')
                     if "CERRAR" in str(row_data['Días Restantes']) or "VENCIDO" in str(row_data['Días Restantes']):
                         style[idias] = 'background-color:#ef4444;color:white;font-weight:bold'
@@ -974,28 +1003,39 @@ with tab6:
                     elif "VENTA" in vsig: style[isig] = 'color:#f87171'
                     else:                 style[isig] = 'color:#facc15'
                     return style
+                
                 st.dataframe(df_show_cartera.style.apply(style_cartera, axis=1).format(
-                    {"Precio Compra": "${:.2f}", "Precio Actual": "${:.2f}", "P&L Actual": "{:+.2%}"}),
+                    {"Precio Compra": "{:.2f}", "Precio Actual": "{:.2f}", "Cantidad": "{:.0f}", 
+                     "P&L Pct": "{:+.2%}", "P&L Monto": "{:+.2f}"}),
                     use_container_width=True, hide_index=True)
 
         st.markdown("#### ❌ Cerrar Posición")
         with st.form("form_cierre"):
             cl1, cl2, _ = st.columns(3)
             df_abiertas["Label_Cierre"] = df_abiertas.apply(
-                lambda x: f"{x['Activo']} (C: {x['Fecha_Compra']} a ${x['Precio_Compra']:.2f})", axis=1)
+                lambda x: f"{x['Activo']} (C: {x['Fecha_Compra']} | Cant: {x['Cantidad']:.0f} a {x['Precio_Compra']:.2f})", axis=1)
             label_dict = dict(zip(df_abiertas["Label_Cierre"], df_abiertas.index))
             ticker_cierre_lbl = cl1.selectbox("Seleccionar operación a liquidar", list(label_dict.keys()))
-            precio_cierre     = cl2.number_input("Precio de Venta / Cierre ($)", min_value=0.01, step=0.5, format="%.2f")
+            precio_cierre     = cl2.number_input("Precio de Venta / Cierre", min_value=0.01, step=0.5, format="%.2f")
+            
             if st.form_submit_button("Liquidar Operación") and ticker_cierre_lbl:
                 idx_to_close = label_dict[ticker_cierre_lbl]
-                resultado_final = (precio_cierre / float(df_completo.at[idx_to_close, "Precio_Compra"])) - 1
-                df_completo.at[idx_to_close, "Estado"]        = "CERRADA"
-                df_completo.at[idx_to_close, "Fecha_Cierre"]  = datetime.today().strftime("%Y-%m-%d")
-                df_completo.at[idx_to_close, "Precio_Cierre"] = precio_cierre
-                df_completo.at[idx_to_close, "Resultado_Pct"] = resultado_final
+                precio_compra_original = float(df_completo.at[idx_to_close, "Precio_Compra"])
+                cantidad_original = float(df_completo.at[idx_to_close, "Cantidad"])
+                moneda_original = str(df_completo.at[idx_to_close, "Moneda"])
+                
+                resultado_pct = (precio_cierre / precio_compra_original) - 1
+                resultado_monto = (precio_cierre - precio_compra_original) * cantidad_original
+                
+                df_completo.at[idx_to_close, "Estado"]          = "CERRADA"
+                df_completo.at[idx_to_close, "Fecha_Cierre"]    = datetime.today().strftime("%Y-%m-%d")
+                df_completo.at[idx_to_close, "Precio_Cierre"]   = precio_cierre
+                df_completo.at[idx_to_close, "Resultado_Pct"]   = resultado_pct
+                df_completo.at[idx_to_close, "Resultado_Monto"] = resultado_monto
+                
                 conn.update(worksheet="Sheet1", data=df_completo)
                 del st.session_state["df_cartera_cache"]
-                st.success(f"✅ Operación cerrada. P&L: {resultado_final*100:+.2f}%."); st.rerun()
+                st.success(f"✅ Operación cerrada. P&L: {resultado_pct*100:+.2f}% ({resultado_monto:+.2f} {moneda_original})."); st.rerun()
     else:
         st.info("📌 No tenés posiciones activas.")
 
@@ -1004,19 +1044,27 @@ with tab6:
         st.markdown("#### 📜 Historial de Operaciones (Track Record)")
         aciertos       = (df_cerradas["Resultado_Pct"] > 0).sum()
         total_cerradas = len(df_cerradas)
-        m1, m2, m3    = st.columns(3)
+        win_rate_hist  = aciertos / total_cerradas
+        
+        acum_usd = df_cerradas[df_cerradas["Moneda"] == "USD"]["Resultado_Monto"].sum()
+        acum_ars = df_cerradas[df_cerradas["Moneda"] == "ARS"]["Resultado_Monto"].sum()
+        
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("Operaciones Cerradas", total_cerradas)
-        m2.metric("Win Rate Histórico",   f"{aciertos/total_cerradas*100:.1f}%")
-        m3.metric("P&L Acumulado",        f"{df_cerradas['Resultado_Pct'].sum()*100:+.2f}%",
-                  delta_color="normal" if df_cerradas["Resultado_Pct"].sum() > 0 else "inverse")
+        m2.metric("Win Rate Histórico",   f"{win_rate_hist*100:.1f}%")
+        m3.metric("P&L Acumulado (USD)",  f"USD {acum_usd:+.2f}", delta_color="normal" if acum_usd >= 0 else "inverse")
+        m4.metric("P&L Acumulado (ARS)",  f"ARS {acum_ars:+.2f}", delta_color="normal" if acum_ars >= 0 else "inverse")
+        
+        df_show_hist = df_cerradas[["Activo","Fecha_Compra","Moneda","Cantidad","Precio_Compra","Fecha_Cierre","Precio_Cierre","Resultado_Pct","Resultado_Monto"]].copy()
+        
         def style_historial(val):
             if isinstance(val, float):
-                if 0 < val < 1: return 'color:#34d399;font-weight:bold'
-                elif val < 0:   return 'color:#f87171;font-weight:bold'
+                if val > 0: return 'color:#34d399;font-weight:bold'
+                elif val < 0: return 'color:#f87171;font-weight:bold'
             return ''
-        st.dataframe(df_cerradas[["Activo","Fecha_Compra","Precio_Compra","Fecha_Cierre","Precio_Cierre","Resultado_Pct"]]
-            .style.map(style_historial, subset=['Resultado_Pct'])
-            .format({"Precio_Compra": "${:.2f}", "Precio_Cierre": "${:.2f}", "Resultado_Pct": "{:+.2%}"}),
+            
+        st.dataframe(df_show_hist.style.map(style_historial, subset=['Resultado_Pct', 'Resultado_Monto']).format(
+            {"Cantidad": "{:.0f}", "Precio_Compra": "{:.2f}", "Precio_Cierre": "{:.2f}", "Resultado_Pct": "{:+.2%}", "Resultado_Monto": "{:+.2f}"}),
             use_container_width=True, hide_index=True)
     else:
         st.markdown("#### 📜 Historial de Operaciones (Track Record)")
@@ -1277,7 +1325,7 @@ with tab7:
 # PIE DE PÁGINA
 # ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("**Modelo IA Screener v7.7** | Desarrollado por: **LAUTHARTE**")
+st.caption("**Modelo IA Screener v7.8** | Desarrollado por: **LAUTHARTE**")
 st.caption(
     "⚠️ **Aviso Legal:** Este sistema es una herramienta de análisis cuantitativo creada exclusivamente "
     "con fines educativos e informativos. NO constituye asesoramiento financiero, de inversión, legal ni fiscal. "
